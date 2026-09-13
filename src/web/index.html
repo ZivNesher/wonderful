@@ -65,9 +65,9 @@
   .msg th { background: rgba(255,255,255,0.08); }
   .web-badge { display: inline-block; font-size: 11px; color: var(--text-faint); background: rgba(255,255,255,0.08); border-radius: 999px; padding: 2px 9px; margin-bottom: 8px; }
   .user { align-self: flex-end; background: var(--surface); color: var(--text); white-space: pre-wrap; }
-  .assistant { align-self: flex-start; background: transparent; padding-left: 0; padding-right: 0; }
+  .assistant { align-self: flex-start; background: var(--surface); }
   .system { align-self: center; color: var(--text-faint); font-size: 12px; font-style: italic; }
-  .thinking { align-self: flex-start; background: transparent; display: flex; gap: 4px; align-items: center; padding: 12px 0; }
+  .thinking { align-self: flex-start; background: var(--surface); display: flex; gap: 4px; align-items: center; padding: 12px 14px; }
   .thinking span { width: 6px; height: 6px; border-radius: 50%; background: var(--text-faint); animation: pulse 1.2s infinite ease-in-out; }
   .thinking span:nth-child(2) { animation-delay: 0.2s; }
   .thinking span:nth-child(3) { animation-delay: 0.4s; }
@@ -77,8 +77,15 @@
   input::placeholder { color: var(--text-faint); }
   input:focus { outline: 1px solid var(--text-faint); }
   button { padding: 10px 16px; border-radius: 8px; border: none; background: var(--accent); color: var(--accent-text); font-size: 14px; font-weight: 600; cursor: pointer; }
-  button:hover:not(:disabled) { background: #d9d9d9; }
+  #send:hover:not(:disabled) { background: #d9d9d9; }
   button:disabled { opacity: 0.5; cursor: default; }
+  .speak-btn {
+    display: block; margin-top: 8px; padding: 0; width: 26px; height: 26px;
+    border-radius: 6px; border: none; background: transparent; color: var(--text-faint);
+    font-size: 14px; font-weight: 400; cursor: pointer;
+  }
+  .speak-btn:hover { background: var(--border); color: var(--text); }
+  .speak-btn.speaking { color: var(--text); }
 </style>
 </head>
 <body>
@@ -104,6 +111,7 @@
   const historyList = document.getElementById("historyList");
   let sessionId = null;
   let conversationId = 0; // bumped whenever the visible conversation changes, to discard stale /chat replies
+  let currentSpeakButton = null; // the per-message speak-btn currently reading aloud, if any
 
   // Escape first, then apply a small whitelist of markdown -> HTML transforms,
   // so raw model text can never become live HTML/script.
@@ -209,6 +217,38 @@
     return html;
   }
 
+  // Reused by both the per-message speak button below and voice mode's
+  // auto-read-back further down; speakText() itself is defined later but
+  // function declarations are hoisted, so the forward reference is safe.
+  function setSpeakButtonState(btn, speaking) {
+    btn.textContent = speaking ? "⏸" : "🔊";
+    btn.title = speaking ? "Stop reading" : "Read aloud";
+    btn.classList.toggle("speaking", speaking);
+  }
+
+  function createSpeakButton(text) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "speak-btn";
+    setSpeakButtonState(btn, false);
+    btn.addEventListener("click", async () => {
+      const wasThisSpeaking = currentSpeakButton === btn;
+      stopSpeaking();
+      if (currentSpeakButton) setSpeakButtonState(currentSpeakButton, false);
+      currentSpeakButton = null;
+      if (wasThisSpeaking) return; // clicking the active button again just stops it
+
+      currentSpeakButton = btn;
+      setSpeakButtonState(btn, true);
+      await speakText(text);
+      if (currentSpeakButton === btn) {
+        setSpeakButtonState(btn, false);
+        currentSpeakButton = null;
+      }
+    });
+    return btn;
+  }
+
   function addMessage(text, role, usedWebSearch) {
     const div = document.createElement("div");
     div.className = "msg " + role;
@@ -219,6 +259,7 @@
       }
       html += renderMarkdownSafe(text);
       div.innerHTML = html;
+      div.appendChild(createSpeakButton(text));
     } else {
       div.textContent = text; // user text and system notices: no formatting needed
     }
