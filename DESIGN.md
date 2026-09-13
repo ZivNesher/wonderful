@@ -34,8 +34,10 @@ Deterministic Python (`scoring.py`) — Claude narrates these numbers, never inv
   for this composite score's percentile methodology. A real seats-based load factor is
   now separately available (`get_traffic_stats`'s `load_factor_pct`, BTS-reported) but
   isn't fed into the composite, to keep the documented weighting/methodology stable.
-- **Capacity pressure** = departures ÷ runway count. An infrastructure-strain proxy,
-  not an official FAA capacity figure.
+- **Capacity pressure** = departures ÷ runway count. An infrastructure-strain proxy —
+  not an official FAA capacity figure, and not a direct measure of terminal/passenger
+  congestion (that would need terminal design capacity, peak-hour volume, or
+  gate/security wait-time data, none of which is in this dataset).
 - **Traffic/pressure/utilization percentiles** = each metric ranked against all other
   tracked airports (0–100), so differently-scaled numbers combine fairly.
 - **Long-haul route share** = of an airport's known nonstop routes, the fraction
@@ -59,10 +61,18 @@ blended together.
 ## Key tradeoffs
 
 - **No growth trend.** BTS's feed gives a trailing 12-month window, not a multi-year
-  time series — scoring is cross-sectional (peer comparison), not longitudinal.
+  time series — scoring is cross-sectional (peer comparison), not longitudinal. This
+  window is *not* a calendar year (it moves forward monthly, e.g. 2025-05 to 2026-04)
+  and there's no separate "latest complete calendar year" figure available — the agent
+  says so plainly rather than reinterpreting the window as one.
 - **No arrivals figure.** This BTS feed only reports departures per origin airport, so
   the agent can state "departures from X" but never a "total operations" (departures +
   arrivals) figure — that data simply isn't published here.
+- **Outbound-only traffic, not guaranteed unbiased.** `passenger_boardings` counts
+  boardings only (no deplanements figure exists). Applying that same definition to
+  every airport makes rankings internally consistent, but airports with unusual
+  inbound/outbound imbalances could still be over- or under-represented — this is not
+  equivalent to ranking by total two-way passenger traffic.
 - **Not a financial ROI model.** The composite score measures operational demand,
   traffic intensity, capacity pressure, and utilization proxies — it is not a
   profitability forecast. A real ROI/profitability model would need data this project
