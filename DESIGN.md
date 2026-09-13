@@ -34,6 +34,10 @@ Deterministic Python (`scoring.py`) — Claude narrates these numbers, never inv
   breadth, not passenger-weighted traffic.
 - **Composite expansion-candidacy score** = `0.40×traffic + 0.35×pressure + 0.25×utilization`
   (all percentiles). Weights are a judgment call, documented as constants in `scoring.py`.
+- **Sensitivity scenarios.** The analyst can ask for custom weights (e.g. "double the
+  weight of congestion"); `rank_airports` recomputes a labeled `custom_score` and its
+  own rank/ties alongside the default score — same formula, different weight inputs,
+  never replacing the canonical score.
 
 "Unmet demand" and "congestion" have no official public metric, so the agent never
 invents one — it either presents the proxies above (when asked to rank/recommend) or
@@ -61,4 +65,5 @@ rather than code), and composing the final explanation with citations.
 
 Claude never: computes a score, validates an identifier, or decides what data/tools
 are reachable — all of that is plain code (`scoring.py`, `tools.py`'s whitelist,
-`agent.py`'s fixed tool schema).
+`agent.py`'s fixed tool schema). This holds for sensitivity scenarios too: Claude only
+chooses which weight numbers to pass; `scoring.py` does the arithmetic and ranking.

@@ -9,8 +9,9 @@ architecture, security, and how to run it.
 
 - Answers questions about airport traffic, congestion, long-haul mix, and expansion
   candidacy, citing its data source for every number.
-- Ranks/compares airports using a deterministic score (`scoring.py`), never an
-  LLM-invented number.
+- Ranks/compares airports using a deterministic score (`scoring.py`), including
+  optional what-if weight adjustments (e.g. "double the weight of congestion") —
+  never an LLM-invented number.
 - Supports follow-up questions, saved across sessions (New/History in the UI).
 - Voice mode: push-to-talk mic input, spoken replies.
 
@@ -35,7 +36,7 @@ FastAPI server (server.py) -- localhost only
    v
 Agent loop (agent.py) -- Claude, tool use
    |
-   +-- tools.py -- 5 read-only functions, validate identifiers before touching data
+   +-- tools.py -- 6 read-only functions, validate identifiers before touching data
    |      +-- retrieval.py --> OurAirports / OpenFlights (bundled) + BTS T-100 (live)
    |      v
    |   scoring.py -- deterministic KPIs, no LLM
@@ -53,7 +54,7 @@ synchronously for one user).
 | Tool | Touches |
 |---|---|
 | `lookup_airport`, `get_airport_profile`, `list_airports_in_region` | The 646-airport whitelist |
-| `get_traffic_stats`, `score_airport` | Whitelist + live BTS query (cached 24h) |
+| `get_traffic_stats`, `score_airport`, `rank_airports` | Whitelist + live BTS query (cached 24h) |
 | `web_search` (native) | The open web — capped at 3 searches/turn, supplementary only |
 
 All read-only. No medium/high-risk tools exist, so there's no confirmation-gate to
