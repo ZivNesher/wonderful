@@ -1,20 +1,13 @@
 from __future__ import annotations
-
 import os
-
 from dotenv import load_dotenv
-
-# Must precede the project imports below -- they read env vars at import time.
 load_dotenv()
-
 import uuid
 from pathlib import Path
-
 import anthropic
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
-
 import agent
 import sessions
 import tts
