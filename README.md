@@ -55,15 +55,15 @@ Full methodology and where every file came from: [DESIGN.md](DESIGN.md#data-sour
  | SERVER   (server.py)                                                                 |
  | needs a public URL while a voice call is running                                     |
  +--------------------------------------------------------------------------------------+
-                      |                                            |
-                      v                                            v
-     +--------------------------------+           +--------------------------------+
-     | sessions.py                    |           | voice_llm.py                   |
-     | saves each text conversation   |           | signed-url + streams answers   |
-     | to a JSON file                 |           | back during a call             |
-     +--------------------------------+           +--------------------------------+
-                                                                    |
-                                                                    v
+                      |                      |                     |
+                      v                      v                     v
+     +--------------------------------+      |    +--------------------------------+
+     | sessions.py                    |      |    | voice_llm.py                   |
+     | saves each text conversation   |      |    | signed-url + streams answers   |
+     | to a JSON file                 |      |    | back during a call             |
+     +--------------------------------+      |    +--------------------------------+
+                                             |                     |
+                                             v                     v
  +--------------------------------------------------------------------------------------+
  | AGENT LOOP   (agent.py)                                                              |
  | Claude + fixed tool list + guardrails.py system prompt                               |
@@ -79,24 +79,33 @@ Full methodology and where every file came from: [DESIGN.md](DESIGN.md#data-sour
        | whitelist FIRST            |               | never a scored number      |
        +----------------------------+               +----------------------------+
                       |
-                      v
- +--------------------------------------------------------------------------------------+
- | retrieval.py  --  loads & fetches                                                    |
- |   - OurAirports        (bundled snapshot)                                            |
- |   - OpenFlights routes   (bundled snapshot)                                          |
- |   - BTS T-100 traffic    (live, cached 24h)                                          |
- +--------------------------------------------------------------------------------------+
-                                             v
- +--------------------------------------------------------------------------------------+
- | scoring.py  --  deterministic KPIs                                                   |
- | no LLM involved -- plain Python math, same input = same output                       |
- +--------------------------------------------------------------------------------------+
+                      +--------------------------------------------+
+                      v                                            v
+     +--------------------------------+           +--------------------------------+
+     | retrieval.py                   |           | scoring.py                     |
+     | loads & fetches:               |           | deterministic KPIs.            |
+     | - OurAirports (bundled)        |           | No LLM involved --             |
+     | - OpenFlights (bundled)        |           | plain Python math,             |
+     | - BTS T-100 (live, cached)     |           | same input = same output       |
+     +--------------------------------+           +--------------------------------+
 ```
 
-Two paths in, one shared brain. Typed chat goes straight from the browser to the
-server; a voice call is a three-way conversation between the browser, ElevenLabs, and
-our server — but either way, the moment a question needs an actual answer, it lands
-in the exact same agent loop, using the exact same tools and rules.
+Under `SERVER`, three things branch off: `sessions.py` just saves and loads text-chat
+history to disk, and never talks to the agent itself. The middle arrow is `server.py`
+calling the agent directly — that's what happens for ordinary typed chat. The right
+arrow goes to `voice_llm.py`, which is what calls the agent during a live voice call.
+Either way, every real question ends up going through the exact same agent loop, the
+exact same tools, and the exact same rules — voice and text never diverge once a
+question actually needs answering.
+
+Lower down, `tools.py` calls `retrieval.py` (to fetch raw data) and `scoring.py` (to
+do the math) independently — they never call each other.
+
+One thing this diagram leaves out on purpose: during a live call, the browser and
+ElevenLabs also talk directly to each other for the actual call audio, over their own
+connection. That's *why* our server needs a public URL at all — not so the browser can
+reach it (it already can, it's just our own webpage), but so ElevenLabs' cloud can
+call back into `/v1/chat/completions` to ask what the agent should say next.
 
 One agent, one process. No database beyond a JSON file per conversation, no vector
 database (everything is looked up by airport code or region, not semantic search), no
