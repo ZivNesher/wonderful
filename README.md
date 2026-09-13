@@ -78,7 +78,8 @@ fast enough synchronously for one local user.
 
 ## Data flow and knowledge sources
 
-Three sources, described in full in DESIGN.md:
+Three sources, described in full in DESIGN.md (per-file provenance and exact filters
+applied: [`data/README.md`](data/README.md)):
 
 1. **OurAirports** (bundled, static) — airport metadata, coordinates, runway counts.
    Filtered at prep time (see `data/` below) to US airports with scheduled commercial

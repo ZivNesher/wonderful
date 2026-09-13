@@ -1,12 +1,3 @@
-"""The only functions the model may call. Every one of them validates its input
-against data loaded from the bundled/public sources in retrieval.py *before*
-doing anything else -- an identifier the model invents that isn't in these
-dictionaries is rejected here, in code, regardless of how it was phrased or why
-the model says it needs it (see SKILL.md #9, #14; README "Security boundaries").
-
-Nothing here is a write/delete/external-messaging action. Every tool is
-read-only and low-risk by the skill's own risk classification.
-"""
 from __future__ import annotations
 
 import re
@@ -49,19 +40,13 @@ REGIONS: dict[str, list[str]] = {
 
 
 def _state_of(airport: retrieval.Airport) -> str:
-    # iso_region looks like "US-CA" -- last two chars are the state abbreviation.
+    """State abbreviation from an airport's iso_region (e.g. "US-CA" -> "CA")."""
     return airport.iso_region.split("-")[-1]
 
 
 def lookup_airport(query: str) -> dict:
-    """Resolve free text (a code, city, or airport name) to a whitelisted airport.
-
-    Deterministic: exact code match first, then whole-word match against city and
-    name, using a small metro-alias map for common shorthand. Never invents a
-    match -- if nothing matches, returns not_found; if more than one plausible
-    match exists, returns them all with `ambiguous: true` so the caller states
-    the assumption instead of silently guessing (see plan §12).
-    """
+    """Resolve free text (a code, city, or airport name) to a whitelisted airport,
+    flagging `ambiguous: true` rather than silently picking one."""
     raw = (query or "").strip()
     if not raw:
         return {"status": "not_found", "query": query}
@@ -101,6 +86,7 @@ def lookup_airport(query: str) -> dict:
 
 
 def _airport_summary(a: retrieval.Airport) -> dict:
+    """Compact, model-facing view of an Airport record."""
     return {
         "iata_code": a.iata_code,
         "icao_code": a.icao_code,
@@ -112,9 +98,8 @@ def _airport_summary(a: retrieval.Airport) -> dict:
 
 
 def _resolve_code(code: str) -> retrieval.Airport | None:
-    """Validate a code against the whitelist. Returns None (not an exception)
-    for anything that isn't an exact, known airport -- callers turn that into an
-    explicit invalid_identifier tool result, never into an external request."""
+    """Validate a code against the whitelist; None (not an exception) if unknown,
+    so callers return invalid_identifier instead of making an external request."""
     if not code or not isinstance(code, str):
         return None
     return _AIRPORTS.get(code.strip().upper())
@@ -187,12 +172,8 @@ def get_traffic_stats(code: str) -> dict:
 
 
 def score_airport(code: str) -> dict:
-    """Deterministic expansion-candidacy scoring for one whitelisted airport.
-
-    Combines BTS traffic (live), OurAirports runway capacity (bundled), and
-    OpenFlights routes (bundled) via scoring.py's pure functions. Every number
-    returned here is computed by code, not by the model -- see scoring.py.
-    """
+    """Deterministic expansion-candidacy scoring for one whitelisted airport,
+    combining BTS traffic, OurAirports runways, and OpenFlights routes."""
     airport = _resolve_code(code)
     if airport is None:
         return {"status": "invalid_identifier", "code": code}

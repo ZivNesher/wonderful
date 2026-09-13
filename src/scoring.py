@@ -1,14 +1,3 @@
-"""Deterministic scoring/ranking logic. No LLM calls anywhere in this file.
-
-The model (agent.py) only ever narrates the numbers these functions produce; it
-never computes or overrides them. See DESIGN.md for the methodology writeup and
-the rationale for each KPI and weight.
-
-Every KPI here is a documented proxy for something not directly published by any
-free public source (see plan §12 / README "known limitations") -- the functions
-are named and shaped to make that explicit rather than implying an official
-metric exists.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -46,23 +35,16 @@ def avg_passengers_per_departure(passengers: int, departures: int) -> float | No
 
 
 def capacity_pressure(departures: int, runway_count: int | None) -> float | None:
-    """Departures per usable runway, current year -- infrastructure-strain proxy.
-
-    Caveat (documented, not hidden): real airport throughput depends on airspace,
-    gates, staffing, and weather, none of which are in these datasets. This is a
-    directional signal, not an engineering capacity study.
-    """
+    """Departures per usable runway, current year -- an infrastructure-strain
+    proxy, not an engineering capacity study (real throughput depends on more)."""
     if not runway_count:
         return None
     return departures / runway_count
 
 
 def percentile_rank(value: float, population: list[float]) -> float:
-    """0-100 percentile of `value` within `population` (inclusive, simple rank).
-
-    Used to put traffic, capacity pressure, and utilization on a comparable
-    0-100 scale before combining them -- avoids arbitrary unit mixing.
-    """
+    """0-100 percentile of `value` within `population` -- puts differently-scaled
+    KPIs on a comparable footing before combining them."""
     if not population:
         return 0.0
     at_or_below = sum(1 for v in population if v <= value)
@@ -75,14 +57,8 @@ def long_haul_share(
     destinations: list[tuple[str, float, float]],
     threshold_miles: float = LONG_HAUL_THRESHOLD_MILES,
 ) -> dict:
-    """Share of an airport's known nonstop ROUTES (OpenFlights snapshot) that are
-    long-haul by great-circle distance. This is a route-network measure, not a
-    flights/passengers-weighted measure -- see README for why.
-
-    `destinations`: list of (code, lat, lon) for each nonstop route out of the
-    origin. Routes whose destination coordinates are unknown are skipped, not
-    silently counted as short-haul.
-    """
+    """Share of an airport's known nonstop routes that are long-haul by
+    great-circle distance -- a route-network measure, not passenger-weighted."""
     if not destinations:
         return {"status": "insufficient_data", "reason": "no known routes for this airport"}
 
@@ -111,13 +87,8 @@ def composite_expansion_score(
     capacity_pressure_percentile: float,
     utilization_percentile: float,
 ) -> float:
-    """Weighted 0-100 expansion-candidacy score from three peer-percentile inputs.
-
-    Weights (see DESIGN.md for rationale):
-      40% traffic intensity  -- raw demand signal
-      35% capacity pressure  -- infrastructure strain signal
-      25% utilization        -- how full current operations already run
-    """
+    """Weighted 0-100 expansion-candidacy score from three peer-percentile
+    inputs (40/35/25 traffic/pressure/utilization -- see DESIGN.md)."""
     return (
         WEIGHT_TRAFFIC_INTENSITY * traffic_percentile
         + WEIGHT_CAPACITY_PRESSURE * capacity_pressure_percentile

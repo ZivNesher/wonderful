@@ -1,14 +1,3 @@
-"""System prompt and scope-policy text. This is the *prompt-level* half of the
-security design -- SKILL.md is explicit that scope/grounding/injection defenses
-belong here AND must be backed by code-level enforcement (tools.py's identifier
-whitelist, the fixed tool schema in agent.py). Nothing in this file can grant
-the model any capability; it only shapes what the model says.
-
-There is nothing secret in this text. If it were ever fully extracted by a
-prompt-injection attack, the worst outcome is disclosure of this policy, not a
-credential or data leak (see README "Prompt-injection risk" for why).
-"""
-
 SCOPE_REFUSAL = (
     "I can only help with airport investment/expansion analysis using our approved "
     "public aviation data (OurAirports, OpenFlights, and BTS T-100 traffic figures). "

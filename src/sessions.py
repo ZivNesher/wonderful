@@ -1,15 +1,3 @@
-"""Local, file-based conversation persistence -- one JSON file per session under
-.sessions/. No database: this is a single-user local tool (README "single-user
-local tool" assumption), and a session is just a message list plus a little
-metadata; a flat per-file read/write covers every access pattern this needs
-("list", "load one") without a query engine (SKILL.md: no database unless the
-requirement demands it).
-
-`session_id` is always a server-generated uuid4 (server.py) -- every function
-here validates that before touching the filesystem, so a malformed or hostile
-ID from a client request can't be used to construct a path outside this
-directory (fails closed to "not found" rather than trusting client input).
-"""
 from __future__ import annotations
 
 import json
@@ -22,6 +10,8 @@ TITLE_MAX_CHARS = 60
 
 
 def is_valid_session_id(session_id: str) -> bool:
+    """True iff session_id parses as a real uuid4 -- the whitelist check every
+    function below relies on before touching the filesystem."""
     try:
         uuid.UUID(session_id)
         return True
@@ -30,12 +20,14 @@ def is_valid_session_id(session_id: str) -> bool:
 
 
 def _path(session_id: str) -> Path | None:
+    """The on-disk path for a session, or None if the ID is invalid."""
     if not is_valid_session_id(session_id):
         return None
     return SESSIONS_DIR / f"{session_id}.json"
 
 
 def _serialize_block(block):
+    """Turn one content block (SDK object or plain dict) into a JSON-safe dict."""
     if isinstance(block, dict):
         return block
     if hasattr(block, "model_dump"):
@@ -44,12 +36,14 @@ def _serialize_block(block):
 
 
 def _serialize_content(content):
+    """Turn one message's content (a string or list of blocks) into JSON-safe form."""
     if isinstance(content, str):
         return content
     return [_serialize_block(b) for b in content]
 
 
 def _auto_title(messages: list[dict]) -> str:
+    """Derive a short conversation title from the first user message."""
     for m in messages:
         if m.get("role") == "user" and isinstance(m.get("content"), str):
             text = m["content"].strip()
@@ -60,6 +54,7 @@ def _auto_title(messages: list[dict]) -> str:
 
 
 def _read_raw(session_id: str) -> dict | None:
+    """Load one session's full JSON record from disk, or None if missing/invalid."""
     path = _path(session_id)
     if path is None or not path.exists():
         return None
@@ -116,9 +111,8 @@ def list_sessions() -> list[dict]:
 
 
 def get_display_messages(session_id: str) -> list[dict] | None:
-    """{role, text, used_web_search} per turn -- what the chat UI showed
-    originally, reconstructed for re-rendering when a saved conversation is
-    resumed. Returns None if the session doesn't exist."""
+    """Reconstruct {role, text, used_web_search} per turn for the History panel;
+    None if the session doesn't exist."""
     raw = _read_raw(session_id)
     if raw is None:
         return None

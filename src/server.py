@@ -1,15 +1,3 @@
-"""Local-only web server: serves the chat page and the chat/history endpoints.
-
-Binds to 127.0.0.1 by default (see __main__ below) -- this is a single-analyst
-local tool, not a multi-tenant service, so there is no login system (documented
-assumption, see README/DESIGN.md). The only thing that matters for the security
-boundary is that the browser never sees the Anthropic API key or any tool
-internals; it only ever sees plain {message, reply} / {session_id, title, ...}
-JSON. Conversation history is persisted locally to disk (sessions.py, one JSON
-file per session under .sessions/) so it survives a server restart -- see
-README "Conversation history" for why that's a deliberate, later addition to
-the original in-memory-only design.
-"""
 from __future__ import annotations
 
 import os
@@ -52,11 +40,13 @@ class ChatResponse(BaseModel):
 
 @app.get("/")
 def index() -> FileResponse:
+    """Serve the single-page chat UI."""
     return FileResponse(WEB_DIR / "index.html")
 
 
 @app.post("/chat", response_model=None)
 def chat(req: ChatRequest) -> ChatResponse | JSONResponse:
+    """Validate the request, run one agent turn, and persist the updated session."""
     message = (req.message or "").strip()
     if not message:
         return JSONResponse(status_code=400, content={"error": "message must not be empty"})
@@ -80,11 +70,13 @@ def chat(req: ChatRequest) -> ChatResponse | JSONResponse:
 
 @app.get("/sessions", response_model=None)
 def list_sessions() -> JSONResponse:
+    """List saved conversations, newest first, for the History panel."""
     return JSONResponse(content={"sessions": sessions.list_sessions()})
 
 
 @app.get("/sessions/{session_id}", response_model=None)
 def get_session(session_id: str) -> JSONResponse:
+    """Return one saved conversation's display messages for resuming."""
     if not sessions.is_valid_session_id(session_id):
         return JSONResponse(status_code=400, content={"error": "invalid session_id"})
     messages = sessions.get_display_messages(session_id)

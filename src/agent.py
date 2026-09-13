@@ -1,12 +1,3 @@
-"""The Claude tool-calling loop. This is the only place the Anthropic API is
-called. The model can reach the outside world two ways: the five functions
-declared in TOOLS below, each backed by a validated function in tools.py, and
-one native, server-side web_search tool (Anthropic-hosted, no client dispatch,
-no new dependency) -- see README "Web search" for why it's scoped as
-supplementary evidence rather than a sixth grounded data source. There is no
-generic HTTP/shell/file tool, so a jailbroken model still cannot act outside
-this fixed surface (see README "Security boundaries").
-"""
 from __future__ import annotations
 
 import json
@@ -92,14 +83,7 @@ TOOLS = [
             "required": ["code"],
         },
     },
-    # Native, Anthropic-hosted server-side tool -- no input_schema (none is
-    # accepted), no client-side dispatch (see run_turn's pause_turn handling
-    # for the one piece of loop logic this actually adds). max_uses is a
-    # cheap, code-level cap on search calls per turn -- kept low (3, down from
-    # an initial 5) so a "why" answer pulls from a couple of sources, not a
-    # multi-outlet roundup with conflicting specifics; which sources count as
-    # credible enough to use is left to the model's judgment per-query rather
-    # than a maintained domain allowlist -- see guardrails.py "WEB SEARCH".
+    # Native, Anthropic-hosted server-side tool
     {"type": "web_search_20260209", "name": "web_search", "max_uses": 3},
 ]
 
@@ -113,6 +97,7 @@ _DISPATCH = {
 
 
 def _run_tool(name: str, tool_input: dict) -> dict:
+    """Dispatch a client-side tool_use block to its handler, failing closed on an unknown name."""
     handler = _DISPATCH.get(name)
     if handler is None:
         # The model can only see the 5 declared tools, so this means the SDK/API
@@ -125,6 +110,7 @@ def _run_tool(name: str, tool_input: dict) -> dict:
 
 
 def _create(client: anthropic.Anthropic, messages: list[dict]):
+    """Send one Messages API request with the fixed model, tools, and system prompt."""
     return client.messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
@@ -135,16 +121,14 @@ def _create(client: anthropic.Anthropic, messages: list[dict]):
 
 
 def _used_web_search(content) -> bool:
+    """True if this response content contains a server-side web_search block."""
     return any(getattr(block, "type", None) in ("server_tool_use", "web_search_tool_result") for block in content)
 
 
 def run_turn(client: anthropic.Anthropic, history: list[dict], user_message: str) -> tuple[str, list[dict], bool]:
-    """Run one user turn to completion (including any tool round-trips).
+    """Run one user turn to completion, including any tool round-trips.
 
-    `history` is the prior message list for this session (in-memory only, per
-    server.py). Returns (assistant_reply_text, updated_history, used_web_search)
-    -- the third value is for the UI's "searched the web" indicator (README
-    "Web search"): a lightweight, post-hoc signal, not a live-progress stream.
+    Returns (reply_text, updated_history, used_web_search).
     """
     messages = history + [{"role": "user", "content": user_message}]
     used_web_search = False

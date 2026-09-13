@@ -1,14 +1,3 @@
-"""Loads the bundled public-data snapshots and queries the one live public API.
-
-Three sources, all read-only, all covered in DESIGN.md:
-  - OurAirports snapshot (data/airports_us.csv, data/runways_us.csv, data/airports_world.csv)
-  - OpenFlights route snapshot (data/routes.csv)
-  - BTS T-100 (NTAD ArcGIS FeatureServer) -- the one live call, cached to disk.
-
-Nothing here talks to the model. This module only returns plain data structures;
-`tools.py` is what the agent is allowed to call, and it validates every identifier
-against the dictionaries loaded here before any external request is made.
-"""
 from __future__ import annotations
 
 import csv
@@ -44,15 +33,14 @@ class Airport:
 
 
 def _read_csv(path: Path) -> list[dict]:
+    """Read a CSV file into a list of dict rows."""
     with path.open(newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
 
 
 def load_airports_us() -> dict[str, Airport]:
-    """US airports with scheduled commercial service -- the scoring whitelist.
-
-    Keyed by both IATA and ICAO code (uppercase) so callers can look up either.
-    """
+    """US airports with scheduled commercial service (the scoring whitelist),
+    keyed by both IATA and ICAO code (uppercase)."""
     by_code: dict[str, Airport] = {}
     for row in _read_csv(DATA_DIR / "airports_us.csv"):
         try:
@@ -77,12 +65,8 @@ def load_airports_us() -> dict[str, Airport]:
 
 
 def load_airports_world_coords() -> dict[str, tuple[float, float]]:
-    """Coordinate lookup for ANY airport (incl. international) by IATA/ICAO code.
-
-    Needed because long-haul routes out of a US airport are frequently
-    international, and the US-only whitelist above must not be used to resolve
-    destination coordinates.
-    """
+    """Coordinate lookup for ANY airport worldwide by IATA/ICAO code -- needed
+    for international long-haul destinations, unlike the US-only whitelist."""
     coords: dict[str, tuple[float, float]] = {}
     for row in _read_csv(DATA_DIR / "airports_world.csv"):
         try:
@@ -97,11 +81,8 @@ def load_airports_world_coords() -> dict[str, tuple[float, float]]:
 
 
 def load_runway_counts() -> dict[str, dict]:
-    """Per-airport runway summary keyed by `ident` (OurAirports identifier).
-
-    Returns {ident: {"runway_count": int, "longest_runway_ft": float | None}}.
-    Closed runways are excluded -- they don't contribute usable capacity.
-    """
+    """Per-airport runway count/longest-length, keyed by `ident`. Closed
+    runways are excluded -- they don't contribute usable capacity."""
     summary: dict[str, dict] = {}
     for row in _read_csv(DATA_DIR / "runways_us.csv"):
         if row.get("closed") == "1":
@@ -138,6 +119,7 @@ def great_circle_distance_miles(lat1: float, lon1: float, lat2: float, lon2: flo
 
 
 def _fetch_bts_page(offset: int, page_size: int = 1000) -> list[dict]:
+    """Fetch one page of rows from the BTS ArcGIS FeatureServer."""
     params = {
         "where": "1=1",
         "outFields": "year,origin,enplanements,passengers,departures,arrivals,freight,mail",
@@ -152,14 +134,8 @@ def _fetch_bts_page(offset: int, page_size: int = 1000) -> list[dict]:
 
 
 def fetch_bts_traffic_all() -> dict[str, dict]:
-    """Bulk-fetch the entire BTS T-100 (NTAD ArcGIS) origin-airport table once,
-    keyed by IATA code. One paginated fetch (~2 requests, the service caps pages
-    at 1000 rows) instead of one HTTP call per airport -- this is both faster for
-    a chat session that touches several airports and is what makes peer-percentile
-    scoring possible without hundreds of live round-trips.
-
-    Cached whole to disk with a 24h TTL.
-    """
+    """Bulk-fetch the whole BTS T-100 origin-airport table once (paginated,
+    ~2 requests), keyed by IATA code, and cache it to disk for 24h."""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     cache_path = CACHE_DIR / "bts_all.json"
     if cache_path.exists() and (time.time() - cache_path.stat().st_mtime) < CACHE_TTL_SECONDS:
