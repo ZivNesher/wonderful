@@ -1,19 +1,23 @@
 from __future__ import annotations
 
 import os
-import uuid
-from pathlib import Path
 
-import anthropic
 from dotenv import load_dotenv
-from fastapi import FastAPI
-from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel
 
-import agent
-import sessions
-
+# Must precede the project imports below -- they read env vars at import time.
 load_dotenv()
+
+import uuid  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+import anthropic  # noqa: E402
+from fastapi import FastAPI  # noqa: E402
+from fastapi.responses import FileResponse, JSONResponse, Response  # noqa: E402
+from pydantic import BaseModel  # noqa: E402
+
+import agent  # noqa: E402
+import sessions  # noqa: E402
+import tts  # noqa: E402
 
 if not os.environ.get("ANTHROPIC_API_KEY"):
     raise RuntimeError(
@@ -38,6 +42,10 @@ class ChatResponse(BaseModel):
     used_web_search: bool = False
 
 
+class TTSRequest(BaseModel):
+    text: str
+
+
 @app.get("/")
 def index() -> FileResponse:
     """Serve the single-page chat UI."""
@@ -54,9 +62,6 @@ def chat(req: ChatRequest) -> ChatResponse | JSONResponse:
         return JSONResponse(status_code=400, content={"error": "message is too long (2000 char max)"})
 
     if req.session_id is not None and not sessions.is_valid_session_id(req.session_id):
-        # Client-supplied session_id is used to build a filesystem path
-        # (sessions.py) -- reject anything that isn't a real uuid4 rather than
-        # trusting it, instead of treating it as "start a new session".
         return JSONResponse(status_code=400, content={"error": "invalid session_id"})
 
     session_id = req.session_id or str(uuid.uuid4())
@@ -66,6 +71,24 @@ def chat(req: ChatRequest) -> ChatResponse | JSONResponse:
     sessions.save(session_id, updated_history)
 
     return ChatResponse(reply=reply_text, session_id=session_id, used_web_search=used_web_search)
+
+
+@app.post("/tts", response_model=None)
+def text_to_speech(req: TTSRequest):
+    """Synthesize speech for voice mode's spoken replies; 503 if unconfigured
+    so the frontend can fall back to the browser's own speechSynthesis."""
+    text = (req.text or "").strip()
+    if not text:
+        return JSONResponse(status_code=400, content={"error": "text must not be empty"})
+    if len(text) > 2000:
+        return JSONResponse(status_code=400, content={"error": "text is too long (2000 char max)"})
+    if not tts.is_configured():
+        return JSONResponse(status_code=503, content={"error": "voice output is not configured"})
+    try:
+        audio = tts.synthesize_speech(text)
+    except Exception as exc:  # noqa: BLE001 -- turned into a clean error, never a raw 500
+        return JSONResponse(status_code=502, content={"error": f"speech synthesis failed: {exc}"})
+    return Response(content=audio, media_type="audio/mpeg")
 
 
 @app.get("/sessions", response_model=None)

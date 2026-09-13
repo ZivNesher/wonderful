@@ -121,6 +121,18 @@ credential — see README "Web search"). Two decisions worth flagging for review
   §14), not a deterministic rule like identifier validation, and because `max_uses`
   still bounds cost/scope in code regardless of which sources get used.
 
+## Voice mode (the brief's explicit bonus)
+
+Turn-based, not a real-time conversational agent — see README "Voice mode" for the
+full reasoning. In short: a true low-latency, interruptible voice conversation needs
+a WebSocket server, streaming STT, a streamed agent loop, and voice-activity
+detection for turn-taking — a multi-day project in its own right, not a natural
+extension of this one, and disproportionate to a brief that calls voice a bonus.
+What's built instead: browser-native speech-to-text (no new dependency) feeding the
+exact same `/chat` path as typing, and ElevenLabs text-to-speech for the reply (one
+new optional API key, falling back to the browser's own voice if unset) — a
+complete, real spoken back-and-forth, just not simultaneously interruptible.
+
 ## Key tradeoffs
 
 **What we verified vs. what the original plan assumed.** The initial plan assumed BTS

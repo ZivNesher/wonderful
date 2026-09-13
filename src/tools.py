@@ -5,7 +5,6 @@ import re
 import retrieval
 import scoring
 
-# Loaded once at import time -- static/bundled snapshots, cheap to hold in memory.
 _AIRPORTS = retrieval.load_airports_us()
 _WORLD_COORDS = retrieval.load_airports_world_coords()
 _RUNWAYS = retrieval.load_runway_counts()
@@ -13,9 +12,7 @@ _ROUTES = retrieval.load_routes_by_source()
 
 _TYPE_RANK = {"large_airport": 0, "medium_airport": 1, "small_airport": 2}
 
-# Small, explicit alias map for common metro-area shorthand. Anything not listed
-# here still falls through to whole-word matching against airport name/city
-# below -- this is a convenience layer, not the only path to a match.
+# Common metro-area shorthand; anything else falls through to whole-word matching.
 _METRO_ALIASES = {
     "la": "Los Angeles",
     "nyc": "New York",
@@ -25,8 +22,6 @@ _METRO_ALIASES = {
     "vegas": "Las Vegas",
 }
 
-# A handful of commonly-referenced US regions as static state-group constants.
-# Unrecognized region names return "unknown_region" rather than guessing.
 REGIONS: dict[str, list[str]] = {
     "new england": ["CT", "ME", "MA", "NH", "RI", "VT"],
     "mid-atlantic": ["NY", "NJ", "PA", "DE", "MD", "DC", "VA", "WV"],
@@ -192,8 +187,6 @@ def score_airport(code: str) -> dict:
     pressure = scoring.capacity_pressure(traffic["departures"], runway_count)
     utilization = scoring.avg_passengers_per_departure(traffic["passengers"], traffic["departures"])
 
-    # Peer capacity-pressure population: same formula applied to every other
-    # whitelisted airport we have both a BTS row and a runway count for.
     pressure_population = []
     for iata, row in all_traffic.items():
         peer_airport = _AIRPORTS.get(iata)

@@ -18,6 +18,12 @@
   .header-actions { display: flex; gap: 8px; flex-shrink: 0; }
   .btn-secondary { padding: 6px 12px; font-size: 12px; background: #1e293b; border: 1px solid #334155; color: #e2e8f0; border-radius: 6px; cursor: pointer; }
   .btn-secondary:hover { background: #334155; }
+  .btn-voice { padding: 10px 14px; border-radius: 8px; border: none; background: #334155; color: white; font-size: 16px; cursor: pointer; line-height: 1; }
+  .btn-voice:hover { background: #475569; }
+  .btn-voice-listening { background: #dc2626; animation: recordPulse 1.4s infinite; }
+  .btn-voice-thinking { background: #d97706; }
+  .btn-voice-speaking { background: #2563eb; }
+  @keyframes recordPulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(220,38,38,0.55); } 50% { box-shadow: 0 0 0 7px rgba(220,38,38,0); } }
   #historyPanel {
     position: absolute; top: 100%; right: 20px; margin-top: 6px; width: 300px; max-height: 360px;
     overflow-y: auto; background: #1e293b; border: 1px solid #334155; border-radius: 8px;
@@ -73,6 +79,7 @@
 <div id="log"></div>
 <form id="form">
   <input id="input" type="text" placeholder="e.g. Which airports in New England are strong candidates for terminal expansion?" autocomplete="off">
+  <button id="voiceBtn" class="btn-voice" type="button" title="Click to speak">🎤</button>
   <button id="send" type="submit">Send</button>
 </form>
 <script>
@@ -85,12 +92,8 @@
   const historyPanel = document.getElementById("historyPanel");
   let sessionId = null;
 
-  // Escape first, THEN apply a small whitelist of markdown -> HTML transforms.
-  // Every substitution below only ever introduces tags this code controls
-  // (<strong>, <em>, <code>, <ul>/<li>, <p>, <br>) -- raw model text can never
-  // become live HTML/script, because it's fully entity-escaped before any
-  // markdown pattern is matched. This replaces the earlier textContent-only
-  // rendering, which was safe but showed literal "**", "-", etc. to the user.
+  // Escape first, then apply a small whitelist of markdown -> HTML transforms,
+  // so raw model text can never become live HTML/script.
   function escapeHtml(text) {
     const div = document.createElement("div");
     div.textContent = text;
@@ -98,7 +101,6 @@
   }
 
   function splitTableRow(line) {
-    // Strip one optional leading/trailing "|", then split on unescaped "|".
     const trimmed = line.trim().replace(/^\|/, "").replace(/\|$/, "");
     return trimmed.split("|").map((cell) => cell.trim());
   }
@@ -111,10 +113,6 @@
       .replace(/\*\*([^*]+?)\*\*/g, "<strong>$1</strong>")
       .replace(/(?:^|(?<=\s))\*([^*\n]+?)\*(?=\s|$)/g, "<em>$1</em>");
 
-  // Line-by-line, not whole-block: real model output routinely puts a header
-  // directly above a list with only a single newline (no blank-line gap), so
-  // classifying whole blank-line-delimited blocks missed that case -- this
-  // walks lines with small amount of state (open list / open paragraph) instead.
   function renderMarkdownSafe(rawText) {
     const lines = escapeHtml(rawText).split("\n");
     let html = "";
@@ -203,10 +201,6 @@
     div.className = "msg " + role;
     if (role === "assistant") {
       let html = "";
-      // Post-hoc, not live: the server tells us after the fact whether this
-      // reply involved a web search (agent.py's used_web_search) -- there's
-      // no mid-request signal to show it while waiting, since the search
-      // itself runs server-side inside one non-streamed API call.
       if (usedWebSearch) {
         html += `<div class="web-badge">🔍 Included a web search</div>`;
       }
@@ -239,16 +233,14 @@
     return "just now";
   }
 
-  let hintEl = null; // the "Ask about..." placeholder -- tracked so it can be
-  // removed the moment a session becomes active (first message sent, or a
-  // saved conversation resumed), rather than lingering above real messages.
+  let hintEl = null; // the "Ask about..." placeholder, removed once a session becomes active
 
   function startNewConversation() {
     sessionId = null;
     log.innerHTML = "";
     hintEl = addMessage("Ask about US airport traffic, congestion, long-haul share, or expansion candidacy.", "system");
     historyPanel.hidden = true;
-    newBtn.hidden = true; // no active session yet -- nothing to start fresh from
+    newBtn.hidden = true;
   }
 
   async function loadSession(id) {
@@ -257,12 +249,12 @@
     const data = await res.json();
     sessionId = data.session_id;
     log.innerHTML = "";
-    hintEl = null; // log was just cleared, so there's nothing left to remove
+    hintEl = null;
     for (const m of data.messages) {
       addMessage(m.text, m.role, m.used_web_search);
     }
     historyPanel.hidden = true;
-    newBtn.hidden = false; // resuming counts as an active session
+    newBtn.hidden = false;
   }
 
   async function toggleHistoryPanel() {
@@ -309,20 +301,18 @@
 
   startNewConversation();
 
-  form.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const message = input.value.trim();
-    if (!message) return;
+  // Shared by the typed form and voice mode.
+  async function sendMessage(message) {
     if (hintEl) {
       hintEl.remove();
       hintEl = null;
     }
-    newBtn.hidden = false; // sending a message starts an active session
+    newBtn.hidden = false;
     addMessage(message, "user");
-    input.value = "";
     sendBtn.disabled = true;
     const thinkingEl = addThinkingIndicator();
 
+    let replyText = null;
     try {
       const res = await fetch("/chat", {
         method: "POST",
@@ -336,13 +326,244 @@
       } else {
         sessionId = data.session_id;
         addMessage(data.reply, "assistant", data.used_web_search);
+        replyText = data.reply;
       }
     } catch (err) {
       thinkingEl.remove();
       addMessage("Network error: " + err.message, "system");
     } finally {
       sendBtn.disabled = false;
-      input.focus();
+    }
+    return replyText;
+  }
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const message = input.value.trim();
+    if (!message) return;
+    input.value = "";
+    await sendMessage(message);
+    input.focus();
+  });
+
+  // ---- Voice mode ----
+
+  function stripMarkdownForSpeech(text) {
+    return text
+      .replace(/```[\s\S]*?```/g, "")
+      .replace(/`([^`]+)`/g, "$1")
+      .replace(/^#{1,6}\s+/gm, "")
+      .replace(/\*\*([^*]+)\*\*/g, "$1")
+      .replace(/\*([^*]+)\*/g, "$1")
+      .replace(/^\s*[-*]\s+/gm, "")
+      .replace(/^\s*\d+[.)]\s+/gm, "")
+      .replace(/^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/gm, "")
+      .replace(/\|/g, ", ")
+      .replace(/\n{2,}/g, ". ")
+      .replace(/\n/g, " ")
+      .replace(/\s{2,}/g, " ")
+      .trim();
+  }
+
+  let currentAudio = null;
+  let voiceFallbackNoticeShown = false;
+
+  function stopSpeaking() {
+    if (currentAudio) currentAudio.pause();
+    if ("speechSynthesis" in window) speechSynthesis.cancel();
+  }
+
+  function playAudioBlob(blob) {
+    return new Promise((resolve) => {
+      const url = URL.createObjectURL(blob);
+      currentAudio = new Audio(url);
+      // "pause" covers stopSpeaking() cutting playback short, so this never hangs.
+      const cleanup = () => {
+        URL.revokeObjectURL(url);
+        currentAudio = null;
+        resolve();
+      };
+      currentAudio.addEventListener("ended", cleanup, { once: true });
+      currentAudio.addEventListener("error", cleanup, { once: true });
+      currentAudio.addEventListener("pause", cleanup, { once: true });
+      currentAudio.play().catch(cleanup);
+    });
+  }
+
+  function speakWithBrowserTTS(text) {
+    return new Promise((resolve) => {
+      if (!("speechSynthesis" in window)) {
+        resolve();
+        return;
+      }
+      const utter = new SpeechSynthesisUtterance(text);
+      utter.addEventListener("end", resolve, { once: true });
+      utter.addEventListener("error", resolve, { once: true });
+      speechSynthesis.speak(utter);
+    });
+  }
+
+  async function speakText(text) {
+    const speechText = stripMarkdownForSpeech(text);
+    if (!speechText) return;
+
+    try {
+      const res = await fetch("/tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: speechText }),
+      });
+      if (res.ok) {
+        await playAudioBlob(await res.blob());
+        return;
+      }
+    } catch (err) {
+      // network error -- fall through to the browser fallback below
+    }
+
+    if (!voiceFallbackNoticeShown) {
+      voiceFallbackNoticeShown = true;
+      addMessage("Voice output is using your browser's built-in voice (set ELEVENLABS_API_KEY for a more natural one).", "system");
+    }
+    await speakWithBrowserTTS(speechText);
+  }
+
+  const voiceBtn = document.getElementById("voiceBtn");
+  const SpeechRecognitionImpl = window.SpeechRecognition || window.webkitSpeechRecognition;
+  // Brave disables the speech-recognition backend permanently (not
+  // intermittently), so detect it via its own official API to skip retrying.
+  let isBrave = false;
+  if (navigator.brave && typeof navigator.brave.isBrave === "function") {
+    navigator.brave.isBrave().then((result) => { isBrave = result; });
+  }
+  let recognition = null;
+  let liveTranscript = "";
+  let voiceState = "idle"; // idle -> listening -> thinking -> speaking -> idle
+  let networkRetryCount = 0;
+  const MAX_NETWORK_RETRIES = 3; // a flaky first attempt is a known SpeechRecognition quirk
+
+  function setVoiceButtonState(state) {
+    voiceState = state;
+    const icons = { idle: "🎤", listening: "⏹️", thinking: "⏳", speaking: "🔊" };
+    voiceBtn.textContent = icons[state];
+    voiceBtn.title = state === "listening" ? "Click to stop and send" : state === "idle" ? "Click to speak" : "Click to cancel";
+    voiceBtn.classList.remove("btn-voice-listening", "btn-voice-thinking", "btn-voice-speaking");
+    if (state !== "idle") voiceBtn.classList.add("btn-voice-" + state);
+  }
+
+  function resetVoiceUI() {
+    if (recognition) {
+      recognition.onresult = null;
+      recognition.onerror = null;
+      try { recognition.stop(); } catch (err) {}
+      recognition = null;
+    }
+    stopSpeaking();
+    input.readOnly = false;
+    setVoiceButtonState("idle");
+  }
+
+  // Restarts the underlying recognition session without resetting
+  // liveTranscript, so a mid-utterance retry doesn't lose what was heard.
+  function beginRecognitionInstance() {
+    recognition = new SpeechRecognitionImpl();
+    recognition.lang = "en-US";
+    recognition.continuous = true; // the analyst clicks to stop, not silence detection
+    recognition.interimResults = true; // live partial text = "hearing you" indicator
+
+    recognition.onresult = (event) => {
+      networkRetryCount = 0; // a real result means the network path works
+      let combined = "";
+      for (let i = 0; i < event.results.length; i++) combined += event.results[i][0].transcript;
+      liveTranscript = combined.trim();
+      input.value = liveTranscript; // visible, live proof it's hearing you
+    };
+
+    recognition.onerror = (event) => {
+      if (voiceState !== "listening") return;
+      if (event.error === "no-speech" || event.error === "aborted") {
+        beginRecognitionInstance(); // benign -- keep listening
+        return;
+      }
+      if (event.error === "network") {
+        if (isBrave) {
+          addMessage(
+            "Voice input doesn't work in Brave -- Brave disables the Google speech-recognition service this browser API depends on. Text chat and spoken replies work fine here; for voice input, use Chrome or Edge.",
+            "system"
+          );
+          resetVoiceUI();
+          return;
+        }
+        networkRetryCount++;
+        if (networkRetryCount <= MAX_NETWORK_RETRIES) {
+          setTimeout(() => { if (voiceState === "listening") beginRecognitionInstance(); }, 500);
+          return;
+        }
+        addMessage(
+          "Voice input keeps failing with a network error. Chrome's speech recognition sends your audio to Google's servers to transcribe it, so this means that connection is blocked -- check your internet connection, VPN/firewall, or an ad-blocker/privacy extension that might be blocking it.",
+          "system"
+        );
+        resetVoiceUI();
+        return;
+      }
+      addMessage("Voice input error: " + event.error, "system");
+      resetVoiceUI();
+    };
+
+    try {
+      recognition.start();
+    } catch (err) {
+      addMessage("Could not start voice input: " + err.message, "system");
+      resetVoiceUI();
+    }
+  }
+
+  function startListening() {
+    liveTranscript = "";
+    input.value = "";
+    input.readOnly = true; // avoid the live transcript fighting with manual typing
+    networkRetryCount = 0;
+    setVoiceButtonState("listening");
+    beginRecognitionInstance();
+  }
+
+  async function stopListeningAndSend() {
+    if (recognition) {
+      recognition.onresult = null;
+      recognition.onerror = null;
+      try { recognition.stop(); } catch (err) {}
+      recognition = null;
+    }
+    const transcript = liveTranscript.trim();
+    input.value = "";
+    input.readOnly = false;
+    if (!transcript) {
+      setVoiceButtonState("idle");
+      return;
+    }
+
+    setVoiceButtonState("thinking");
+    const reply = await sendMessage(transcript);
+    if (voiceState !== "thinking") return; // cancelled while the request was in flight
+    if (reply) {
+      setVoiceButtonState("speaking");
+      await speakText(reply);
+      if (voiceState !== "speaking") return; // cancelled mid-reply
+    }
+    setVoiceButtonState("idle");
+  }
+
+  voiceBtn.addEventListener("click", () => {
+    if (voiceState === "idle") {
+      if (!SpeechRecognitionImpl) {
+        addMessage("Voice input isn't supported in this browser (try Chrome or Edge).", "system");
+        return;
+      }
+      startListening();
+    } else if (voiceState === "listening") {
+      stopListeningAndSend();
+    } else {
+      resetVoiceUI(); // thinking/speaking -- cancel this turn
     }
   });
 </script>

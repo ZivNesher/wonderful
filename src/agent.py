@@ -10,10 +10,8 @@ from guardrails import SYSTEM_PROMPT
 
 MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5")
 MAX_TOKENS = 2048
-MAX_TOOL_ROUNDS = 6  # hard cap so a confused loop can't run away
-MAX_PAUSE_RESUMES = 3  # server-side web-search loop hits pause_turn at 10 internal
-# iterations; this bounds how many times we resend to let it continue before
-# failing closed, mirroring MAX_TOOL_ROUNDS' purpose for client-side tools.
+MAX_TOOL_ROUNDS = 6
+MAX_PAUSE_RESUMES = 3  # web_search's server-side loop caps at 10 iterations before pausing
 
 TOOLS = [
     {
@@ -100,8 +98,6 @@ def _run_tool(name: str, tool_input: dict) -> dict:
     """Dispatch a client-side tool_use block to its handler, failing closed on an unknown name."""
     handler = _DISPATCH.get(name)
     if handler is None:
-        # The model can only see the 5 declared tools, so this means the SDK/API
-        # sent something unexpected -- fail closed rather than guess.
         return {"status": "error", "reason": f"unknown tool: {name}"}
     try:
         return handler(tool_input)
@@ -137,12 +133,8 @@ def run_turn(client: anthropic.Anthropic, history: list[dict], user_message: str
         response = _create(client, messages)
         used_web_search = used_web_search or _used_web_search(response.content)
 
-        # web_search runs its own server-side loop (search, read, maybe search
-        # again) and only hands control back to us at end_turn, a client
-        # tool_use request, or pause_turn if it hit the server's internal
-        # iteration cap. pause_turn resumes by resending the same history
-        # unchanged -- no new user message, no tool_result (see SKILL.md-
-        # aligned docs: "the API detects the trailing server_tool_use block").
+        # pause_turn: web_search hit its internal iteration cap. Resume by
+        # resending the same history unchanged (no new message).
         resumes = 0
         while response.stop_reason == "pause_turn" and resumes < MAX_PAUSE_RESUMES:
             messages.append({"role": "assistant", "content": response.content})
@@ -153,8 +145,6 @@ def run_turn(client: anthropic.Anthropic, history: list[dict], user_message: str
         messages.append({"role": "assistant", "content": response.content})
 
         if response.stop_reason == "pause_turn":
-            # Still paused after MAX_PAUSE_RESUMES -- fail closed rather than
-            # return a silently truncated answer.
             return (
                 "I hit my web-search iteration limit before finishing that lookup. "
                 "Could you narrow the question?",
@@ -180,8 +170,6 @@ def run_turn(client: anthropic.Anthropic, history: list[dict], user_message: str
             )
         messages.append({"role": "user", "content": tool_results})
 
-    # Hit MAX_TOOL_ROUNDS without a final answer -- fail closed with a plain
-    # message rather than silently returning nothing.
     return (
         "I wasn't able to finish gathering data for that within my tool-call budget. "
         "Could you narrow the question (e.g. one airport or region at a time)?",

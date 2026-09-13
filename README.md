@@ -41,10 +41,12 @@ to run the tests.
 Browser (src/web/index.html)
    |  POST /chat {message, session_id}
    |  GET /sessions, GET /sessions/{id}  (New / History buttons)
+   |  POST /tts {text} -> audio/mpeg     (Voice button's spoken output)
    v
 FastAPI server (src/server.py) -- localhost only
    |
    +-- sessions.py -- one JSON file per conversation under .sessions/
+   +-- tts.py -- ElevenLabs speech synthesis, optional (falls back client-side)
    |
    v
 Agent loop (src/agent.py) -- Claude Messages API, tool use, max 6 tool rounds
@@ -210,6 +212,74 @@ here is our own single-user frontend. `tests/test_server.py::test_get_session_in
 and `::test_invalid_session_id_rejected_on_chat` cover this directly (a `../../etc/passwd`-
 style ID).
 
+## Voice mode
+
+A 🎤 button next to the text input, explicit push-to-talk rather than automatic
+silence-detection: click to start listening (icon becomes ⏹️, a pulsing red mic), speak,
+click again when you're done to stop and send — the transcript is submitted through
+`sendMessage()`, the same function the typed form uses, so voice and text conversations
+share one code path and one saved session. This is a deliberately scoped-down "Tier 1"
+implementation, not a real-time conversational agent; see below for why that's a
+different, much larger project.
+
+**"Is it hearing me?"** — the input field shows the live partial transcript as you
+speak (`SpeechRecognition`'s `interimResults`), so there's direct, visible proof it's
+listening rather than a bare "Listening…" label with no feedback. The field is
+read-only while listening (so the live transcript and manual typing can't collide) and
+clears back to editable once you stop. Clicking while a reply is being generated or
+spoken cancels that turn and returns to idle rather than doing nothing.
+
+**Input** is the browser's native `SpeechRecognition` (`webkitSpeechRecognition` on
+Chrome/Edge/Safari; confirmed working in Safari too, not just Chromium browsers;
+Firefox and Brave don't support it -- unsupported/blocked browsers get a clear message
+instead of silently failing). No new dependency, no new API key, no backend change.
+Note this API isn't fully on-device — Chrome streams the audio to Google's servers to
+transcribe it, which is why it can fail with a `network` error if that path is blocked
+(VPN/firewall/privacy extension) even though everything else in the app is local; a
+flaky first attempt is also a documented quirk of the API, so a `network` error retries
+automatically up to 3 times before surfacing a diagnostic message.
+
+**Brave is a special case, detected explicitly.** Brave exposes the `SpeechRecognition`
+JS API (so feature detection passes) but deliberately disables the Google backend it
+depends on — every attempt fails with `network`, permanently, not intermittently, so
+the 3-retry logic above would just waste 1.5s failing the same way every time. The page
+checks `navigator.brave.isBrave()` (Brave's own official detection API) and, when true,
+skips straight to a Brave-specific message pointing at Chrome/Edge instead of retrying
+a call that can never succeed. Text chat and spoken *replies* (TTS) are unaffected in
+Brave — this only applies to the mic input path.
+
+**Output** is ElevenLabs TTS (`src/tts.py`, `POST /tts`) for a natural-sounding voice,
+falling back to the browser's own `speechSynthesis` (with a one-time notice) if
+`ELEVENLABS_API_KEY` isn't set or the call fails — voice mode works out of the box,
+just with a more robotic fallback voice until a key is added. The reply text is
+converted to plain speakable text first (`stripMarkdownForSpeech`) so it doesn't read
+`**`, `#`, or table pipes aloud.
+
+**If it's falling back to the robotic voice despite a key being set:** the fallback
+also triggers on any non-200 from ElevenLabs, not just a missing key, and their API
+returns a 401 with `"missing_permissions"` if the key exists but wasn't granted the
+**Text to Speech** permission when it was created (ElevenLabs API keys are scoped) —
+check that permission in your ElevenLabs dashboard, not just that the key is present.
+Also remember `.env` is only read at server startup, so a key added while the server
+was already running needs a restart to take effect.
+
+**Why this is turn-based, not a real conversation.** A genuine real-time voice agent —
+continuous listening with barge-in (the agent stops talking the instant you start),
+low-latency streamed speech in both directions — needs a fundamentally different
+architecture: a WebSocket server (this one is plain request/response), streaming
+speech-to-text (browser STT isn't built for it), the agent loop switched to streamed
+token generation, and voice-activity detection for turn-taking. That's a multi-day
+build with its own new failure modes, not an extension of this project, and voice was
+called a bonus in the brief — so this implementation deliberately stays turn-based:
+each exchange completes (listen → think → speak) before the next one starts, and you
+can't interrupt a reply mid-sentence, only stop voice mode entirely.
+
+**Security/cost note:** `ELEVENLABS_API_KEY` follows the same pattern as
+`ANTHROPIC_API_KEY` — server-side only (`tts.py`), never sent to the browser. `/tts`
+caps input at 2,000 characters, mirroring `/chat`'s cap, so a single call can't run away
+on cost. If the key is unset, `/tts` returns 503 rather than crashing the server or
+breaking text chat and voice input, which are fully independent of it.
+
 ## Security boundaries
 
 - **Model ↔ tools:** a fixed tool schema (`agent.py::TOOLS`) — five client-dispatched
@@ -307,13 +377,15 @@ true; and the "searched the web" UI indicator is post-hoc, not a live progress s
 |---|---|
 | `anthropic` | The only LLM call in the system (tool use + composition) |
 | `fastapi`, `uvicorn`, `pydantic` | The chosen chat interface (a minimal local web app) |
-| `requests` | The one live HTTP call, to BTS's public ArcGIS endpoint |
+| `requests` | The one live HTTP call, to BTS's public ArcGIS endpoint (also used by `tts.py` for ElevenLabs -- one small REST call didn't justify their SDK) |
 | `python-dotenv` | Loads `.env` locally so the API key isn't exported by hand every run |
 | `pytest` | Runs the test suite |
 
 Nothing else. No ORM, no vector store client, no task queue, no web framework beyond
 FastAPI itself. **Web search added no new dependency** — it's a native Messages API
-tool, called through the same `anthropic` client already in this table.
+tool, called through the same `anthropic` client already in this table. **Voice mode
+added no new Python dependency either** — speech input/output are browser APIs, and
+ElevenLabs TTS is one REST call via the `requests` library already listed above.
 
 ## Running it
 
@@ -321,7 +393,7 @@ tool, called through the same `anthropic` client already in this table.
 cd airport-investment-agent
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # then fill in ANTHROPIC_API_KEY
+cp .env.example .env   # then fill in ANTHROPIC_API_KEY (ELEVENLABS_API_KEY is optional -- Voice mode)
 python3 src/server.py  # binds to 127.0.0.1:8000
 ```
 
@@ -342,17 +414,26 @@ ANTHROPIC_API_KEY=sk-... pytest tests/test_live_eval.py   # live behavioral eval
 The suite is split in two, deliberately:
 
 - **`test_scoring.py`, `test_tools.py`, `test_agent_harness.py`, `test_server.py`,
-  `test_sessions.py`** — fully deterministic, offline, no API key. These prove the
-  code: scoring formulas, identifier validation (skill §17 "tool safety": invalid
-  parameters, unauthorized identifiers), the tool-calling loop's mechanics (dispatch,
-  unknown-tool handling, the `MAX_TOOL_ROUNDS` fail-closed cutoff, `pause_turn`
-  resumption and its own `MAX_PAUSE_RESUMES` cutoff, the `used_web_search` detection),
-  the HTTP layer (request validation, session continuity across a simulated restart,
-  invalid-session-id rejection), and conversation persistence (save/load round-trips,
-  auto-titling, turn reconstruction for the History panel) — using a scripted fake
-  Anthropic client / monkeypatched `agent.run_turn` and an isolated temp directory in
-  place of `.sessions/`, so none of this depends on a real model call or touches real
-  saved conversations.
+  `test_sessions.py`, `test_tts.py`** — fully deterministic, offline, no API key.
+  These prove the code: scoring formulas, identifier validation (skill §17 "tool
+  safety": invalid parameters, unauthorized identifiers), the tool-calling loop's
+  mechanics (dispatch, unknown-tool handling, the `MAX_TOOL_ROUNDS` fail-closed
+  cutoff, `pause_turn` resumption and its own `MAX_PAUSE_RESUMES` cutoff, the
+  `used_web_search` detection), the HTTP layer (request validation, session
+  continuity across a simulated restart, invalid-session-id rejection), conversation
+  persistence (save/load round-trips, auto-titling, turn reconstruction for the
+  History panel), and the ElevenLabs client (request shape, truncation, unconfigured/
+  upstream-failure error paths) — using a scripted fake Anthropic client /
+  monkeypatched `agent.run_turn`/`tts.synthesize_speech` and an isolated temp
+  directory in place of `.sessions/`, so none of this depends on a real model call,
+  a real ElevenLabs key, or touches real saved conversations. Voice mode's
+  browser-side state machine (listen → send → speak → listen again, including
+  mid-speech interruption not hanging the loop, and the markdown-to-speech text
+  cleanup) was verified against the actual shipped script with a scripted
+  `SpeechRecognition`/`Audio`/`fetch` DOM stub during development, the same
+  technique used for the markdown renderer -- not checked into this repo (it
+  needs a JS test runner this project doesn't otherwise depend on), so treat
+  that piece as developer-verified rather than covered by `pytest tests/`.
 - **`test_live_eval.py`** — the skill §13/§17 behavioral checklist (off-topic refusal,
   direct jailbreak, prompt/credential extraction, encoded extraction, indirect
   injection via a mocked tool response, ambiguous questions, regional/multi-airport
@@ -366,7 +447,7 @@ The suite is split in two, deliberately:
   correct but can't prove model behavior. Skipped automatically if `ANTHROPIC_API_KEY`
   isn't set.
 
-This project's own test run: all 71 tests passing (54 offline + the 17-test live eval
+This project's own test run: all 80 tests passing (63 offline + the 17-test live eval
 suite run against the real Claude API), and the full pipeline was smoke-tested against
 live BTS data for SFO, ANC, SNA, LAX, and BOS during development, plus a manual
 end-to-end check of a real "unmet demand" question showing web search correctly
