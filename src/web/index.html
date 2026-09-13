@@ -65,7 +65,7 @@
     <h1>Airport Investment Agent</h1>
   </div>
   <div class="header-actions">
-    <button id="newBtn" class="btn-secondary" type="button">New</button>
+    <button id="newBtn" class="btn-secondary" type="button" hidden>New</button>
     <button id="historyBtn" class="btn-secondary" type="button">History</button>
   </div>
   <div id="historyPanel" hidden></div>
@@ -239,11 +239,16 @@
     return "just now";
   }
 
+  let hintEl = null; // the "Ask about..." placeholder -- tracked so it can be
+  // removed the moment a session becomes active (first message sent, or a
+  // saved conversation resumed), rather than lingering above real messages.
+
   function startNewConversation() {
     sessionId = null;
     log.innerHTML = "";
-    addMessage("Ask about US airport traffic, congestion, long-haul share, or expansion candidacy.", "system");
+    hintEl = addMessage("Ask about US airport traffic, congestion, long-haul share, or expansion candidacy.", "system");
     historyPanel.hidden = true;
+    newBtn.hidden = true; // no active session yet -- nothing to start fresh from
   }
 
   async function loadSession(id) {
@@ -252,10 +257,12 @@
     const data = await res.json();
     sessionId = data.session_id;
     log.innerHTML = "";
+    hintEl = null; // log was just cleared, so there's nothing left to remove
     for (const m of data.messages) {
       addMessage(m.text, m.role, m.used_web_search);
     }
     historyPanel.hidden = true;
+    newBtn.hidden = false; // resuming counts as an active session
   }
 
   async function toggleHistoryPanel() {
@@ -306,6 +313,11 @@
     e.preventDefault();
     const message = input.value.trim();
     if (!message) return;
+    if (hintEl) {
+      hintEl.remove();
+      hintEl = null;
+    }
+    newBtn.hidden = false; // sending a message starts an active session
     addMessage(message, "user");
     input.value = "";
     sendBtn.disabled = true;
