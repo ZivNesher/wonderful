@@ -7,17 +7,17 @@ from dotenv import load_dotenv
 # Must precede the project imports below -- they read env vars at import time.
 load_dotenv()
 
-import uuid  # noqa: E402
-from pathlib import Path  # noqa: E402
+import uuid
+from pathlib import Path
 
-import anthropic  # noqa: E402
-from fastapi import FastAPI  # noqa: E402
-from fastapi.responses import FileResponse, JSONResponse, Response  # noqa: E402
-from pydantic import BaseModel  # noqa: E402
+import anthropic
+from fastapi import FastAPI
+from fastapi.responses import FileResponse, JSONResponse, Response
+from pydantic import BaseModel
 
-import agent  # noqa: E402
-import sessions  # noqa: E402
-import tts  # noqa: E402
+import agent
+import sessions
+import tts
 
 if not os.environ.get("ANTHROPIC_API_KEY"):
     raise RuntimeError(
