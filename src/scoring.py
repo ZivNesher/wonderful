@@ -82,15 +82,38 @@ def long_haul_share(
     }
 
 
+def rank_by_score(scored_items: list[tuple[str, float]]) -> list[dict]:
+    """Standard competition ranking (ties share a rank; the next distinct rank
+    skips accordingly, e.g. 1, 2, 2, 4) over (code, score) pairs, highest score
+    first. Exists so position/tie comparisons are computed once, in code, rather
+    than inferred by the model from a list of individual scores."""
+    ranked = sorted(scored_items, key=lambda item: item[1], reverse=True)
+    result = []
+    for i, (code, score) in enumerate(ranked):
+        rank = i + 1 if i == 0 or score != ranked[i - 1][1] else result[-1]["rank"]
+        result.append({"code": code, "score": score, "rank": rank})
+    return result
+
+
 def composite_expansion_score(
     traffic_percentile: float,
     capacity_pressure_percentile: float,
     utilization_percentile: float,
+    weights: tuple[float, float, float] | None = None,
 ) -> float:
     """Weighted 0-100 expansion-candidacy score from three peer-percentile
-    inputs (40/35/25 traffic/pressure/utilization -- see DESIGN.md)."""
-    return (
-        WEIGHT_TRAFFIC_INTENSITY * traffic_percentile
-        + WEIGHT_CAPACITY_PRESSURE * capacity_pressure_percentile
-        + WEIGHT_UTILIZATION * utilization_percentile
+    inputs. Defaults to the canonical 40/35/25 traffic/pressure/utilization
+    weighting (see DESIGN.md) when `weights` is omitted. A custom (traffic,
+    pressure, utilization) tuple can be passed for a what-if sensitivity
+    scenario -- weights are normalized by their own sum, so e.g. (1, 2, 1)
+    (double weight on capacity pressure) works the same as the default triple
+    summing to 1.0."""
+    w_traffic, w_pressure, w_utilization = weights or (
+        WEIGHT_TRAFFIC_INTENSITY, WEIGHT_CAPACITY_PRESSURE, WEIGHT_UTILIZATION
     )
+    total_weight = w_traffic + w_pressure + w_utilization
+    return (
+        w_traffic * traffic_percentile
+        + w_pressure * capacity_pressure_percentile
+        + w_utilization * utilization_percentile
+    ) / total_weight

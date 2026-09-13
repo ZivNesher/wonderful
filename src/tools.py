@@ -159,16 +159,46 @@ def get_traffic_stats(code: str) -> dict:
         "source": "BTS T-100 Domestic Market and Segment Data (NTAD), current-year totals",
         "year": row["year"],
         "iata_code": airport.iata_code,
-        "passengers": row["passengers"],
+        "passenger_boardings": row["passengers"],
         "departures": row["departures"],
         "arrivals": row["arrivals"],
         "enplanements": row["enplanements"],
+        "caveats": [
+            "'passenger_boardings' and 'enplanements' both count passengers boarding AT this "
+            "airport -- 'passenger_boardings' is BTS's Segment-level count, 'enplanements' is "
+            "BTS's Market-level count. Neither is a two-way total, and this dataset has no "
+            "deplanements figure. Never call either one 'total passenger traffic' or 'passengers "
+            "handled'; name the metric precisely (e.g. 'passenger boardings').",
+            "'departures' and 'arrivals' are flight-operation counts, not passenger counts.",
+        ],
     }
 
 
-def score_airport(code: str) -> dict:
+def _normalize_weights(weights) -> tuple[float, float, float] | None:
+    """Turn a model-supplied {traffic, capacity_pressure, utilization} dict into
+    a (traffic, pressure, utilization) tuple for a sensitivity scenario, defaulting
+    any KPI not mentioned to 1 (equal weighting) -- None if nothing usable was given,
+    so the caller falls back to the canonical score untouched."""
+    if not weights or not isinstance(weights, dict):
+        return None
+    try:
+        w = (
+            float(weights.get("traffic", 1)),
+            float(weights.get("capacity_pressure", 1)),
+            float(weights.get("utilization", 1)),
+        )
+    except (TypeError, ValueError):
+        return None
+    if any(x < 0 for x in w) or sum(w) == 0:
+        return None
+    return w
+
+
+def score_airport(code: str, weights: dict | None = None) -> dict:
     """Deterministic expansion-candidacy scoring for one whitelisted airport,
-    combining BTS traffic, OurAirports runways, and OpenFlights routes."""
+    combining BTS traffic, OurAirports runways, and OpenFlights routes. An
+    optional `weights` dict adds a custom sensitivity-scenario score alongside
+    (never instead of) the canonical expansion_candidacy_score."""
     airport = _resolve_code(code)
     if airport is None:
         return {"status": "invalid_identifier", "code": code}
@@ -185,7 +215,7 @@ def score_airport(code: str) -> dict:
     departures_population = [r["departures"] for r in all_traffic.values() if r.get("departures")]
 
     pressure = scoring.capacity_pressure(traffic["departures"], runway_count)
-    utilization = scoring.avg_passengers_per_departure(traffic["passengers"], traffic["departures"])
+    utilization = scoring.avg_passengers_per_departure(traffic["passenger_boardings"], traffic["departures"])
 
     pressure_population = []
     for iata, row in all_traffic.items():
@@ -204,7 +234,7 @@ def score_airport(code: str) -> dict:
         ) if u is not None
     ]
 
-    traffic_percentile = scoring.percentile_rank(traffic["passengers"], passengers_population)
+    traffic_percentile = scoring.percentile_rank(traffic["passenger_boardings"], passengers_population)
     pressure_percentile = scoring.percentile_rank(pressure, pressure_population) if pressure is not None else None
     utilization_percentile = (
         scoring.percentile_rank(utilization, utilization_population) if utilization is not None else None
@@ -214,6 +244,22 @@ def score_airport(code: str) -> dict:
     if pressure_percentile is not None and utilization_percentile is not None:
         composite = scoring.composite_expansion_score(traffic_percentile, pressure_percentile, utilization_percentile)
 
+    custom_scenario = None
+    custom_weights = _normalize_weights(weights)
+    if custom_weights is not None and composite is not None:
+        custom_score = scoring.composite_expansion_score(
+            traffic_percentile, pressure_percentile, utilization_percentile, weights=custom_weights
+        )
+        custom_scenario = {
+            "label": "custom sensitivity scenario -- NOT the default methodology",
+            "weights_used": {
+                "traffic": custom_weights[0],
+                "capacity_pressure": custom_weights[1],
+                "utilization": custom_weights[2],
+            },
+            "custom_score": round(custom_score, 1),
+        }
+
     destinations = []
     for dest_code in _ROUTES.get(airport.iata_code.upper(), []) + _ROUTES.get(airport.icao_code.upper(), []):
         coords = _WORLD_COORDS.get(dest_code.upper())
@@ -221,14 +267,14 @@ def score_airport(code: str) -> dict:
             destinations.append((dest_code, coords[0], coords[1]))
     long_haul = scoring.long_haul_share(airport.latitude_deg, airport.longitude_deg, destinations)
 
-    return {
+    result = {
         "status": "ok",
         "code": airport.iata_code or airport.icao_code,
         "name": airport.name,
         "year": traffic["year"],
         "sources": [traffic["source"], "OurAirports (bundled)", "OpenFlights routes.dat (bundled)"],
         "inputs": {
-            "passengers": traffic["passengers"],
+            "passenger_boardings": traffic["passenger_boardings"],
             "departures": traffic["departures"],
             "runway_count": runway_count,
         },
@@ -244,5 +290,43 @@ def score_airport(code: str) -> dict:
             "capacity_pressure is a directional proxy (departures per runway), not an official airfield-capacity figure.",
             "Percentiles are cross-sectional (current year only); no multi-year growth trend is available from the anonymous BTS source used here.",
             "long_haul share reflects OpenFlights' route-network snapshot, not live schedules or passenger volume.",
+            "These are throughput/capacity-pressure proxies, not a direct measure of terminal or "
+            "passenger congestion -- that would need terminal design capacity, peak-hour passenger "
+            "volume, gate utilization, or security wait-time data, none of which is in this dataset.",
         ],
     }
+    if custom_scenario is not None:
+        result["custom_scenario"] = custom_scenario
+    return result
+
+
+def rank_airports(codes: list, weights: dict | None = None) -> dict:
+    """Deterministically rank 2+ whitelisted airports by expansion_candidacy_score
+    (and, if `weights` is given, by the matching custom sensitivity score) -- exact
+    rank numbers and ties are computed in code via scoring.rank_by_score, not
+    inferred by the model. Reuses score_airport for every number; no new scoring
+    logic lives here."""
+    if not codes or not isinstance(codes, list):
+        return {"status": "error", "reason": "codes must be a non-empty list of airport codes"}
+
+    scored = {}
+    for code in codes:
+        result = score_airport(code, weights=weights)
+        if result["status"] != "ok":
+            return {"status": "insufficient_data", "code": code, "reason": result.get("reason", "scoring failed")}
+        scored[result["code"]] = result
+
+    response = {
+        "status": "ok",
+        "default_ranking": scoring.rank_by_score(
+            [(code, r["expansion_candidacy_score"]) for code, r in scored.items()]
+        ),
+    }
+
+    custom_items = [(code, r["custom_scenario"]["custom_score"]) for code, r in scored.items() if "custom_scenario" in r]
+    if custom_items:
+        response["custom_ranking"] = scoring.rank_by_score(custom_items)
+        response["custom_scenario_label"] = next(iter(scored.values()))["custom_scenario"]["label"]
+        response["weights_used"] = next(iter(scored.values()))["custom_scenario"]["weights_used"]
+
+    return response

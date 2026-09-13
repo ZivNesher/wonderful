@@ -6,6 +6,7 @@ BTS function is monkeypatched everywhere it would otherwise fire.
 """
 import pytest
 
+import guardrails
 import retrieval
 import tools
 
@@ -86,6 +87,101 @@ def test_list_airports_in_region_unknown_region():
     assert "new england" in result["known_regions"]
 
 
+def test_get_traffic_stats_caveats_disambiguate_passengers_vs_enplanements(monkeypatch):
+    """SFO passenger questions must not confuse 'passengers'/'enplanements' with a
+    two-way total -- the tool output itself must carry that disambiguation."""
+    monkeypatch.setattr(
+        retrieval,
+        "fetch_bts_traffic_all",
+        lambda: {"SFO": {"year": 2024, "origin": "SFO", "passengers": 17666714, "departures": 138571, "arrivals": 138528, "enplanements": 17631272}},
+    )
+    result = tools.get_traffic_stats("SFO")
+    assert result["status"] == "ok"
+    caveats_text = " ".join(result["caveats"]).lower()
+    assert "two-way total" in caveats_text
+    assert "flight-operation counts, not passenger counts" in caveats_text
+
+
+def test_score_airport_caveats_distinguish_proxy_from_terminal_congestion(monkeypatch):
+    """Capacity-pressure/utilization figures must be labeled as throughput proxies,
+    not a direct measure of terminal/passenger congestion."""
+    monkeypatch.setattr(
+        retrieval,
+        "fetch_bts_traffic_all",
+        lambda: {"SFO": {"year": 2024, "origin": "SFO", "passengers": 17666714, "departures": 138571, "arrivals": 138528, "enplanements": 17631272}},
+    )
+    result = tools.score_airport("SFO")
+    assert result["status"] == "ok"
+    caveats_text = " ".join(result["caveats"]).lower()
+    assert "not a direct measure of terminal or" in caveats_text
+    assert "passenger congestion" in caveats_text
+
+
+def test_system_prompt_treats_departures_as_the_answer_for_flights_from_an_airport():
+    """'How many flights operate from X' should be answered with departures, with
+    total operations (departures + arrivals) kept as an explicit secondary figure."""
+    prompt = guardrails.SYSTEM_PROMPT
+    assert '"from"/"out of" an airport, departures is the answer' in prompt
+    assert "total operations (departures + arrivals)" in prompt
+
+
+def test_score_airport_with_weights_adds_custom_scenario_without_changing_default(monkeypatch):
+    """'Double the weight of congestion' must add a clearly labeled custom score
+    alongside the canonical one, never replace or alter it."""
+    fake_traffic = {
+        "SFO": {"year": 2024, "origin": "SFO", "passengers": 17666714, "departures": 138571, "arrivals": 138528, "enplanements": 17631272},
+        "LAX": {"year": 2024, "origin": "LAX", "passengers": 26340206, "departures": 206637, "arrivals": 207004, "enplanements": 26239010},
+    }
+    monkeypatch.setattr(retrieval, "fetch_bts_traffic_all", lambda: fake_traffic)
+
+    baseline = tools.score_airport("SFO")
+    assert "custom_scenario" not in baseline
+
+    result = tools.score_airport("SFO", weights={"capacity_pressure": 2})
+    assert result["expansion_candidacy_score"] == baseline["expansion_candidacy_score"]
+    assert result["custom_scenario"]["label"].startswith("custom sensitivity scenario")
+    assert result["custom_scenario"]["weights_used"] == {"traffic": 1.0, "capacity_pressure": 2.0, "utilization": 1.0}
+
+    t = result["traffic_percentile_vs_peers"]
+    p = result["capacity_pressure_percentile_vs_peers"]
+    u = result["utilization_percentile_vs_peers"]
+    assert result["custom_scenario"]["custom_score"] == round((1 * t + 2 * p + 1 * u) / 4, 1)
+
+
+def test_normalize_weights_missing_kpis_default_to_one():
+    assert tools._normalize_weights({"capacity_pressure": 2}) == (1.0, 2.0, 1.0)
+    assert tools._normalize_weights(None) is None
+    assert tools._normalize_weights({}) is None
+    assert tools._normalize_weights({"traffic": -1}) is None  # negative weight rejected
+
+
+def test_rank_airports_computes_default_and_custom_ranks_with_ties(monkeypatch):
+    """rank_airports must compute exact rank/tie positions in code -- the model
+    should never have to infer 'who moved past whom' itself."""
+    def _fake_score_airport(code, weights=None):
+        default_scores = {"BTV": 50, "MHT": 45, "BGR": 40}
+        custom_scores = {"BTV": 50, "MHT": 45, "BGR": 50}  # BTV/BGR tie once congestion is doubled
+        result = {"status": "ok", "code": code, "expansion_candidacy_score": default_scores[code]}
+        if weights:
+            result["custom_scenario"] = {
+                "label": "custom sensitivity scenario -- NOT the default methodology",
+                "weights_used": {"traffic": 1.0, "capacity_pressure": 2.0, "utilization": 1.0},
+                "custom_score": custom_scores[code],
+            }
+        return result
+
+    monkeypatch.setattr(tools, "score_airport", _fake_score_airport)
+
+    result = tools.rank_airports(["BTV", "MHT", "BGR"], weights={"capacity_pressure": 2})
+    assert result["status"] == "ok"
+
+    default_ranks = {r["code"]: r["rank"] for r in result["default_ranking"]}
+    assert default_ranks == {"BTV": 1, "MHT": 2, "BGR": 3}
+
+    custom_ranks = {r["code"]: r["rank"] for r in result["custom_ranking"]}
+    assert custom_ranks == {"BTV": 1, "BGR": 1, "MHT": 3}  # tied for 1st, MHT drops to 3rd
+
+
 def test_indirect_injection_in_tool_output_is_inert_data(monkeypatch):
     """A malicious/compromised upstream response embedding instruction-like text
     must come back to the caller as plain data -- tools.py has no code path that
@@ -102,4 +198,4 @@ def test_indirect_injection_in_tool_output_is_inert_data(monkeypatch):
     # the injected string is just data on the wire; tools.py never reads `origin`
     # back out of the row for anything (it trusts the already-validated code),
     # so nothing here should have altered control flow or raised.
-    assert result["passengers"] == 100
+    assert result["passenger_boardings"] == 100

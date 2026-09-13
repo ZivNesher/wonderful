@@ -77,12 +77,64 @@ TOOLS = [
             "expansion', 'should we invest', 'rank/compare these'). Do not call it for a plain "
             "factual question about one airport's traffic, congestion, or demand -- use "
             "get_traffic_stats/get_airport_profile for that instead, and never estimate these "
-            "numbers yourself if you do need them."
+            "numbers yourself if you do need them. "
+            "Optional `weights` arg runs a custom what-if sensitivity scenario ALONGSIDE the "
+            "default score (never replacing it): pass any of traffic/capacity_pressure/"
+            "utilization as numbers, e.g. {'capacity_pressure': 2} to double the weight of "
+            "congestion. Any KPI you don't mention defaults to 1 (equal weighting), so 'double "
+            "congestion' means {'capacity_pressure': 2} with traffic and utilization implicitly "
+            "1 each. Call this once per airport you're re-ranking, with the same weights each "
+            "time. To return to the normal ranking on a later question, just call it again with "
+            "no `weights` arg -- there is no separate reset step."
         ),
         "input_schema": {
             "type": "object",
-            "properties": {"code": {"type": "string"}},
+            "properties": {
+                "code": {"type": "string"},
+                "weights": {
+                    "type": "object",
+                    "description": (
+                        "Optional custom KPI weights for a sensitivity scenario, e.g. "
+                        "{'capacity_pressure': 2}. Omit entirely for the default score."
+                    ),
+                    "properties": {
+                        "traffic": {"type": "number"},
+                        "capacity_pressure": {"type": "number"},
+                        "utilization": {"type": "number"},
+                    },
+                },
+            },
             "required": ["code"],
+        },
+    },
+    {
+        "name": "rank_airports",
+        "description": (
+            "Deterministically rank 2+ whitelisted airports by expansion_candidacy_score, with "
+            "exact rank numbers and ties computed in code (standard competition ranking: ties "
+            "share a rank, the next distinct rank skips accordingly, e.g. 5, 5, 7). Call this "
+            "ALONGSIDE score_airport (which you'd still call once per airport for the detailed "
+            "figures/caveats) whenever presenting a ranking or comparing airport order -- and "
+            "especially for a 'recalculate the ranking'/'how does the order change' follow-up "
+            "after adjusting weights, pass the same `weights` here. Always state position/tie "
+            "changes using exactly the rank numbers this tool returns; never infer or recall "
+            "who moved past whom from the individual score_airport results."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "codes": {"type": "array", "items": {"type": "string"}, "description": "2+ airport codes to rank together"},
+                "weights": {
+                    "type": "object",
+                    "description": "Optional, same shape as score_airport's -- adds a custom_ranking alongside the default one.",
+                    "properties": {
+                        "traffic": {"type": "number"},
+                        "capacity_pressure": {"type": "number"},
+                        "utilization": {"type": "number"},
+                    },
+                },
+            },
+            "required": ["codes"],
         },
     },
     # Native, Anthropic-hosted server-side tool
@@ -94,7 +146,8 @@ _DISPATCH = {
     "get_airport_profile": lambda i: tools.get_airport_profile(i.get("code", "")),
     "list_airports_in_region": lambda i: tools.list_airports_in_region(i.get("region", "")),
     "get_traffic_stats": lambda i: tools.get_traffic_stats(i.get("code", "")),
-    "score_airport": lambda i: tools.score_airport(i.get("code", "")),
+    "score_airport": lambda i: tools.score_airport(i.get("code", ""), weights=i.get("weights")),
+    "rank_airports": lambda i: tools.rank_airports(i.get("codes", []), weights=i.get("weights")),
 }
 
 

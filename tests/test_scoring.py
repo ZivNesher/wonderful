@@ -65,3 +65,25 @@ def test_composite_expansion_score_weights_sum_correctly():
 def test_composite_expansion_score_known_weighted_value():
     # 0.40*80 + 0.35*40 + 0.25*20 = 32 + 14 + 5 = 51
     assert scoring.composite_expansion_score(80, 40, 20) == 51.0
+
+
+def test_rank_by_score_ties_use_standard_competition_ranking():
+    # BTV and BGR tie for 5th; MHT (ahead of BGR on raw score) drops to 7th --
+    # the rank skips 6, matching the reported New England BTV/MHT/BGR example.
+    scored = [
+        ("BOS", 90), ("BDL", 80), ("PVD", 70), ("PWM", 60),
+        ("BTV", 50), ("MHT", 45), ("BGR", 50),
+    ]
+    ranked = scoring.rank_by_score(scored)
+    ranks = {r["code"]: r["rank"] for r in ranked}
+    assert ranks == {"BOS": 1, "BDL": 2, "PVD": 3, "PWM": 4, "BTV": 5, "BGR": 5, "MHT": 7}
+
+
+def test_composite_expansion_score_custom_weights_double_congestion():
+    # (traffic*1 + capacity_pressure*2 + utilization*1) / 4 = (80 + 80 + 20) / 4 = 45
+    assert scoring.composite_expansion_score(80, 40, 20, weights=(1, 2, 1)) == 45.0
+
+
+def test_composite_expansion_score_omitted_weights_equals_canonical_weights():
+    default_weights = (scoring.WEIGHT_TRAFFIC_INTENSITY, scoring.WEIGHT_CAPACITY_PRESSURE, scoring.WEIGHT_UTILIZATION)
+    assert scoring.composite_expansion_score(80, 40, 20) == scoring.composite_expansion_score(80, 40, 20, weights=default_weights)
