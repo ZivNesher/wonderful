@@ -1,71 +1,151 @@
 # Airport Investment Intelligence Agent
 
-A chat agent for screening US commercial airports for terminal/runway expansion
-potential — grounded in public aviation data, backed by a deterministic scoring layer.
-See [DESIGN.md](DESIGN.md) for scoring methodology and tradeoffs; this file covers
-architecture, security, and how to run it.
+A chat agent that helps analysts figure out which US airports are worth investing in
+for terminal or runway expansion. It's grounded in public aviation data and backed by
+a deterministic scoring system — no invented numbers. See [DESIGN.md](DESIGN.md) for
+how the scoring actually works and what tradeoffs we made along the way. This file is
+about the architecture, security, and how to actually run the thing.
 
 ## What it does
 
-- Answers questions about airport traffic, congestion, long-haul mix, and expansion
-  candidacy, citing its data source for every number.
-- Ranks/compares airports using a deterministic score (`scoring.py`), including
-  optional what-if weight adjustments (e.g. "double the weight of congestion") —
-  never an LLM-invented number.
-- Supports follow-up questions, saved across sessions (New/History in the UI).
-- Voice mode: push-to-talk mic input, spoken replies.
+- Answers questions about airport traffic, congestion, long-haul routes, and whether
+  an airport looks like a good expansion candidate — and always tells you where the
+  number came from.
+- Ranks or compares airports with a deterministic score, computed in plain Python
+  (`scoring.py`), never something the AI just made up. You can even ask it to run a
+  "what if" scenario, like dou bling the weight it gives to congestion.
+- Remembers past conversations, so you can pick up where you left off (see New/History
+  in the sidebar).
+- Supports a real, live voice call with the agent — you talk, it talks back, using
+  ElevenLabs' voice platform. No typing needed.
 
 ## What it doesn't do
 
-- No real-time/interruptible voice conversation (see DESIGN.md).
-- No growth forecasting — scoring is current-state, not predictive.
-- No multi-user accounts — single local analyst tool.
-- No write/delete/external-messaging actions — every tool is read-only.
+- No growth forecasting — it tells you where things stand today, not where they're
+  headed.
+- Nothing that writes, deletes, or sends anything anywhere — every tool it has only
+  reads data.
 
 ## Data sources
 
-- **Public API — BTS T-100 (data.bts.gov, monthly-updated).** Passenger boardings,
-  departures, seats, and load factor, summed over a trailing 12-month window that
-  moves with the live data. Queried live at runtime, cached 24h. Free, but requires
-  a free Socrata app token (`BTS_SOCRATA_APP_TOKEN`, see "Running it" below).
-- **Bundled public datasets** (static snapshots, not APIs):
-  - **OurAirports** — airport/runway metadata.
-  - **OpenFlights** `routes.dat` — route-network snapshot used for long-haul share.
+- **Public API — BTS T-100** (data.bts.gov, updated monthly). Gives us passenger
+  boardings, departures, seats, and load factor for every US airport, always looking
+  at the trailing 12 months. It's free, but needs a Socrata app token — see
+  "Running it" below.
+- **Bundled datasets** (static files, not APIs):
+  - **OurAirports** — airport and runway details.
+  - **OpenFlights** — which routes each airport actually flies, used to work out
+    long-haul share.
 
-Full methodology and per-file provenance: [DESIGN.md](DESIGN.md#data-sources).
+Full methodology and where every file came from: [DESIGN.md](DESIGN.md#data-sources).
 
 ## Architecture
-![alt text](<Screenshot 2026-09-13 at 16.10.41.png>)
 
-One agent, one process. No database (sessions are one JSON file each — nothing here
-needs a query engine), no vector database (every lookup is by airport code/region, not
-semantic search), no queue (a few cached HTTP calls per turn is fast enough
-synchronously for one user).
+```
+    +-----------------------------------+    +-------------------------------------------+
+    | BROWSER  (web/index.html)         |    | ELEVENLABS  (cloud)                       |
+    | typed chat + voice-call button    |    | runs the live call: mic, speech-to-text,  |
+    |                                   |    | spoken replies, turn-taking               |
+    +-----------------------------------+    +-------------------------------------------+
+                      |                                            |
+         POST /chat, GET /sessions,                    POST /v1/chat/completions
+         GET /voice-call/signed-url                   ("what should I say next?")
+                      v                                            v
+ +--------------------------------------------------------------------------------------+
+ | SERVER   (server.py)                                                                 |
+ | needs a public URL while a voice call is running                                     |
+ +--------------------------------------------------------------------------------------+
+                      |                                            |
+                      v                                            v
+     +--------------------------------+           +--------------------------------+
+     | sessions.py                    |           | voice_llm.py                   |
+     | saves each text conversation   |           | signed-url + streams answers   |
+     | to a JSON file                 |           | back during a call             |
+     +--------------------------------+           +--------------------------------+
+                                                                    |
+                                                                    v
+ +--------------------------------------------------------------------------------------+
+ | AGENT LOOP   (agent.py)                                                              |
+ | Claude + fixed tool list + guardrails.py system prompt                               |
+ | loop:  ask -> (maybe) run a tool -> ask again -> final answer                        |
+ +--------------------------------------------------------------------------------------+
+                      |                                            |
+              client-side tools                               native tool
+                      v                                            v
+       +----------------------------+               +----------------------------+
+       | tools.py                   |               | web_search                 |
+       | 6 read-only functions;     |               | (Anthropic-hosted)         |
+       | checks airport code vs     |               | supplementary only --      |
+       | whitelist FIRST            |               | never a scored number      |
+       +----------------------------+               +----------------------------+
+                      |
+                      v
+ +--------------------------------------------------------------------------------------+
+ | retrieval.py  --  loads & fetches                                                    |
+ |   - OurAirports        (bundled snapshot)                                            |
+ |   - OpenFlights routes   (bundled snapshot)                                          |
+ |   - BTS T-100 traffic    (live, cached 24h)                                          |
+ +--------------------------------------------------------------------------------------+
+                                             v
+ +--------------------------------------------------------------------------------------+
+ | scoring.py  --  deterministic KPIs                                                   |
+ | no LLM involved -- plain Python math, same input = same output                       |
+ +--------------------------------------------------------------------------------------+
+```
+
+Two paths in, one shared brain. Typed chat goes straight from the browser to the
+server; a voice call is a three-way conversation between the browser, ElevenLabs, and
+our server — but either way, the moment a question needs an actual answer, it lands
+in the exact same agent loop, using the exact same tools and rules.
+
+One agent, one process. No database beyond a JSON file per conversation, no vector
+database (everything is looked up by airport code or region, not semantic search), no
+background queue — a handful of cached HTTP calls per question is fast enough to just
+do synchronously.
 
 ## Tool permissions
 
 | Tool | Touches |
 |---|---|
 | `lookup_airport`, `get_airport_profile`, `list_airports_in_region` | The 646-airport whitelist |
-| `get_traffic_stats`, `score_airport`, `rank_airports` | Whitelist + live BTS query (cached 24h) |
-| `web_search` (native) | The open web — capped at 3 searches/turn, supplementary only |
+| `get_traffic_stats`, `score_airport`, `rank_airports` | Whitelist + a live BTS query (cached 24h) |
+| `web_search` (native) | The open web — capped at 3 searches per turn, and only used to fill gaps, never to produce a score |
 
-All read-only. No medium/high-risk tools exist, so there's no confirmation-gate to
-build. Every identifier is checked against the whitelist **in code** before any
-external call — an unknown code never reaches the BTS API.
+Everything here is read-only, so there's nothing that needs an "are you sure?"
+confirmation step. Every airport code gets checked against the whitelist in code
+before it's ever used in a real request — an unknown code never reaches the BTS API.
 
 ## Security boundaries
 
-- **Secrets stay server-side.** `ANTHROPIC_API_KEY`, `BTS_SOCRATA_APP_TOKEN`, and
-  `ELEVENLABS_API_KEY` are never sent to the browser or placed in a prompt.
-- **Fixed tool schema.** No arbitrary HTTP/shell/file/code-execution tool is ever
-  exposed to the model — a jailbreak has nothing to escalate to.
-- **Tool output is data, not instructions** (including web search results) — stated
-  explicitly in the system prompt, since open web text is the least vetted input here.
-- **Path-safe session IDs.** `GET /sessions/{id}` and `/chat`'s `session_id` are
-  validated as real UUIDs in code before touching the filesystem.
-- **Grounding.** Every airport-specific number must come from a tool call in that
-  conversation; missing data is reported as missing, never estimated.
+- **Secrets never leave the server.** `ANTHROPIC_API_KEY`, `BTS_SOCRATA_APP_TOKEN`, and
+  `ELEVENLABS_API_KEY` are never sent to the browser or dropped into a prompt.
+- **The model can't do anything we didn't build a tool for.** There's no generic
+  "run this command" or "call this URL" tool, so even a successful jailbreak has
+  nowhere to escalate to.
+- **Tool results are treated as data, not instructions** — including anything that
+  comes back from a web search. This is spelled out explicitly in the system prompt,
+  since the open web is the least trustworthy input this system ever sees.
+- **Session IDs are checked before touching disk.** Both `/chat` and `/sessions/{id}`
+  validate that the ID is a real UUID before it's used to read or write a file.
+- **Every number is grounded.** Any airport-specific figure the agent states has to
+  come from an actual tool call made in that conversation. If the data isn't there,
+  it says so — it never fills the gap with a guess.
+
+## Voice call
+
+Beyond typed chat, you can have an actual real-time conversation with the agent —
+click the call button, talk normally, get spoken answers back. This works through
+ElevenLabs' Conversational AI platform: ElevenLabs handles the microphone, the
+speech-to-text, the text-to-speech, and the back-and-forth of a live call, while our
+own server plugs in as the "brain" behind it, using the exact same Claude agent and
+tools as the typed chat.
+
+To turn this on, you'll need:
+- An ElevenLabs account with Conversational AI (Agents) access, and an Agent created
+  there with its "Custom LLM" pointed at your server's `/v1/chat/completions`.
+- A public URL your server is reachable at (a tool like ngrok works fine for
+  testing) — ElevenLabs needs to be able to reach your server from the internet.
+- The env vars below, filled in.
 
 ## Running it
 
@@ -73,28 +153,21 @@ external call — an unknown code never reaches the BTS API.
 cd airport-investment-agent
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # fill in ANTHROPIC_API_KEY and BTS_SOCRATA_APP_TOKEN
-                        # (both required; ELEVENLABS_API_KEY optional)
+cp .env.example .env   # fill in the required keys below
 python3 src/server.py  # binds to 127.0.0.1:8000
 ```
 
-`BTS_SOCRATA_APP_TOKEN`: free, instant, no approval wait -- sign up at
-[data.bts.gov/signup](https://data.bts.gov/signup), then Profile → Developer
-Settings → Create New App Token.
+Required:
+- `ANTHROPIC_API_KEY` — powers the agent itself.
+- `BTS_SOCRATA_APP_TOKEN` — free, instant, no approval wait. Sign up at
+  [data.bts.gov/signup](https://data.bts.gov/signup), then Profile → Developer
+  Settings → Create New App Token.
 
-## Tests
+Only needed for the voice call feature:
+- `ELEVENLABS_API_KEY` — needs the "ElevenAgents: Write" permission turned on.
+- `ELEVENLABS_AGENT_ID` — the Agent you created in ElevenLabs' dashboard.
+- `VOICE_LLM_SHARED_SECRET` — any random string you make up yourself. It's how the
+  server checks that a request to `/v1/chat/completions` is really coming from your
+  ElevenLabs Agent, not a stranger on the internet. Put the same value into the
+  Agent's Custom LLM config as its Authorization header ("Bearer &lt;this value&gt;").
 
-```bash
-pytest tests/                                              # offline, no API key needed
-ANTHROPIC_API_KEY=sk-... pytest tests/test_live_eval.py     # live behavioral eval
-```
-
-Offline tests (`test_scoring.py`, `test_tools.py`, `test_retrieval.py`,
-`test_agent_harness.py`, `test_server.py`, `test_sessions.py`, `test_tts.py`) prove the
-code — scoring formulas, identifier validation, the tool-calling loop, HTTP layer,
-persistence — with
-a scripted fake Anthropic client, so none of it depends on a real model call.
-`test_live_eval.py` runs the skill's behavioral checklist (scope refusal, jailbreak
-resistance, prompt/credential extraction, indirect injection, grounding) against the
-real Claude API — the only way to actually test model behavior, not just the harness
-around it. Skipped automatically without `ANTHROPIC_API_KEY`.

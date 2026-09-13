@@ -2,97 +2,108 @@
 
 ## What it does
 
-A chat agent that helps analysts screen US airports for terminal/runway expansion
-potential, using public aviation data and a deterministic scoring model. Claude
-handles conversation and tool orchestration; it never computes a score itself.
+A chat agent that helps analysts screen US airports for terminal or runway expansion
+potential, using public aviation data and a scoring model that's plain deterministic
+code — not something the AI is guessing at. Claude's job is to understand the
+question, decide which data to pull, and explain the answer in normal language. It
+never computes a score itself.
 
 ## Data sources
 
 | Source | Gives us | Access |
 |---|---|---|
-| [OurAirports](https://ourairports.com/data/) | Airport metadata, coordinates, runways | Static snapshot, bundled |
-| [OpenFlights](https://openflights.org/data.php) `routes.dat` | Nonstop route pairs | Static snapshot, bundled |
-| [BTS T-100](https://data.bts.gov/d/r495-tyji) (data.bts.gov) | Passenger boardings, departures, seats, and load factor, summed over a trailing 12-month window that moves with the live data (currently 2025-05 to 2026-04) | Public API, queried live at runtime, monthly-updated, free Socrata app token required |
+| [OurAirports](https://ourairports.com/data/) | Airport details, coordinates, runways | Bundled snapshot |
+| [OpenFlights](https://openflights.org/data.php) `routes.dat` | Which routes each airport flies | Bundled snapshot |
+| [BTS T-100](https://data.bts.gov/d/r495-tyji) (data.bts.gov) | Passenger boardings, departures, seats, and load factor, always looking at the trailing 12 months (right now that's 2025-05 through 2026-04) | Live public API, updated monthly, needs a free Socrata app token |
 
-No single free source anonymously provides destination/distance/seats, so three
-sources cover what one couldn't: BTS for traffic volume and load factor, OpenFlights +
-OurAirports coordinates for long-haul distance, OurAirports for runway capacity.
-Per-file provenance: [`data/README.md`](data/README.md).
-
-BTS switched mid-project from a static NTAD snapshot (2024 only, no key, but no
-`arrivals`/`seats` either) to BTS's own monthly Socrata feed once we found it: this
-data.bts.gov dataset is updated monthly, includes a real seats-based load factor (not
-just a proxy), but requires a free app token for any multi-row query (single-airport
-lookups are open). It also has no `arrivals` field, so "total flight operations" is no
-longer something the agent can state — only departures.
+No single free source gives us everything (destination, distance, seat counts), so we
+combine three: BTS for traffic volume and load factor, OpenFlights plus OurAirports'
+coordinates for long-haul distance, and OurAirports for runway capacity. Where each
+file actually came from: [`data/README.md`](data/README.md).
 
 ## Scoring methodology
 
-Deterministic Python (`scoring.py`) — Claude narrates these numbers, never invents them.
+All deterministic Python (`scoring.py`) — Claude just narrates these numbers, it
+never invents them.
 
-- **Avg. passengers per departure** = passengers ÷ departures. A utilization proxy used
-  for this composite score's percentile methodology. A real seats-based load factor is
-  now separately available (`get_traffic_stats`'s `load_factor_pct`, BTS-reported) but
-  isn't fed into the composite, to keep the documented weighting/methodology stable.
-- **Capacity pressure** = departures ÷ runway count. An infrastructure-strain proxy —
-  not an official FAA capacity figure, and not a direct measure of terminal/passenger
-  congestion (that would need terminal design capacity, peak-hour volume, or
-  gate/security wait-time data, none of which is in this dataset).
-- **Traffic/pressure/utilization percentiles** = each metric ranked against all other
-  tracked airports (0–100), so differently-scaled numbers combine fairly.
-- **Long-haul route share** = of an airport's known nonstop routes, the fraction
-  ≥2,500 miles (great-circle, via OurAirports coordinates). Measures route-network
-  breadth, not passenger-weighted traffic.
-- **Composite expansion-candidacy score** = `0.40×traffic + 0.35×pressure + 0.25×utilization`
-  (all percentiles). This 40/35/25 weighting is the canonical, production score — a
-  judgment call documented as constants in `scoring.py`.
-- **Sensitivity scenarios.** The analyst can ask for custom weights (e.g. "double the
-  weight of congestion"); `rank_airports` recomputes a separately labeled `custom_score`
-  and its own rank/ties alongside the default score, using the same formula with
-  different weight inputs (any KPI not mentioned defaults to 1, i.e. equal weighting
-  *for that scenario only*). This is always temporary and additive — it never overwrites
-  or is described as the canonical 40/35/25 score.
+- **Avg. passengers per departure** = passengers ÷ departures. A rough stand-in for
+  "how full are the planes," and it's what actually feeds the composite score below.
+  A real, BTS-reported load factor is also available now (`load_factor_pct`), but we
+  kept it separate rather than swapping it into the formula, so the scoring
+  methodology stays stable and easy to explain.
+- **Capacity pressure** = departures ÷ runway count. A rough proxy for how strained an
+  airport's runways are — not an official FAA number, and not the same thing as
+  terminal or gate congestion (that would need data like security wait times, which
+  we don't have).
+- **Percentiles** — each of the above gets turned into a percentile against every
+  other airport we track, so a small regional airport and a huge international hub
+  can be compared fairly.
+- **Long-haul route share** — of an airport's known nonstop routes, what fraction are
+  2,500+ miles (measured as great-circle distance using OurAirports' coordinates).
+  This tells you about the breadth of the route network, not how many people are
+  actually flying those routes.
+- **Composite expansion-candidacy score** = 40% traffic + 35% capacity pressure + 25%
+  utilization, all as percentiles. That weighting is a judgment call, written as
+  constants in `scoring.py` — it's the one official score.
+- **Sensitivity scenarios** — you can ask the agent to reweight things, like "double
+  the weight of congestion." It runs the same formula with different weights (anything
+  you don't mention defaults to 1) and shows you the custom score and the official one
+  side by side. This is always a temporary what-if, never a replacement for the real
+  score.
 
-"Unmet demand" and "congestion" have no official public metric, so the agent never
-invents one — it either presents the proxies above (when asked to rank/recommend) or
-pulls qualitative context via web search (when asked a plain "why" question), never both
-blended together.
 
 ## Key tradeoffs
 
-- **No growth trend.** BTS's feed gives a trailing 12-month window, not a multi-year
-  time series — scoring is cross-sectional (peer comparison), not longitudinal. This
-  window is *not* a calendar year (it moves forward monthly, e.g. 2025-05 to 2026-04)
-  and there's no separate "latest complete calendar year" figure available — the agent
-  says so plainly rather than reinterpreting the window as one.
-- **No arrivals figure.** This BTS feed only reports departures per origin airport, so
-  the agent can state "departures from X" but never a "total operations" (departures +
-  arrivals) figure — that data simply isn't published here.
-- **Outbound-only traffic, not guaranteed unbiased.** `passenger_boardings` counts
-  boardings only (no deplanements figure exists). Applying that same definition to
-  every airport makes rankings internally consistent, but airports with unusual
-  inbound/outbound imbalances could still be over- or under-represented — this is not
-  equivalent to ranking by total two-way passenger traffic.
-- **Not a financial ROI model.** The composite score measures operational demand,
-  traffic intensity, capacity pressure, and utilization proxies — it is not a
-  profitability forecast. A real ROI/profitability model would need data this project
-  doesn't have: construction cost, financing terms, airport/airline revenue, gate
-  economics, operating cost, and project-specific demand forecasts.
-- **Long-haul share is route count, not passenger volume.** OpenFlights records which
-  routes exist, not how often they fly.
-- **Turn-based voice, not real-time.** A continuous, interruptible voice conversation
-  needs a WebSocket server and streaming STT/TTS — a different, larger project than a
-  chat agent with a spoken input/output mode. Voice was called a bonus in the brief.
-- **Single local user.** No auth, no multi-tenant isolation — appropriate for a local
-  analyst tool, not a deployed service.
+- **No growth trend.** BTS gives us a rolling 12-month window, not a multi-year
+  history, so all our scoring is a snapshot comparison against peers right now, not a
+  trend over time. And that window genuinely isn't a calendar year — it just rolls
+  forward each month — so if you ask for "the latest complete calendar year," the
+  agent will tell you honestly that this data source doesn't have one, rather than
+  pretending the rolling window is the same thing.
+- **No arrivals number.** This BTS feed only reports departures per airport, so the
+  agent can tell you how many flights leave an airport, but not the total number of
+  flights in and out combined — that data just isn't published here.
+- **Passenger counts are outbound only.** We only know who boarded a flight at each
+  airport, not who got off one — there's no arrivals-side passenger count in this
+  data. Since every airport is measured the same way, rankings are at least
+  internally consistent, but an airport with unusually lopsided inbound/outbound
+  traffic could still look different than it would under a true two-way count.
+- **This isn't a financial model.** The score tells you about demand, traffic, and
+  capacity strain — not profitability. A real investment case would also need
+  construction costs, financing terms, actual airport/airline revenue, and a proper
+  demand forecast, none of which we have.
+- **Long-haul share counts routes, not passengers.** OpenFlights tells us which
+  routes exist, not how full or how frequent they are.
+- **Single local user.** No accounts, no multi-tenant separation — this is built to
+  be one analyst's local tool, not something you'd deploy for a team.
 
 ## Where AI is used
 
-Claude handles: understanding the question, choosing which tool(s) to call, judging
-web-search source credibility (the one place a quality judgment is left to the model
-rather than code), and composing the final explanation with citations.
+Claude handles understanding the question, deciding which tools to call, judging how
+trustworthy a web search result looks (the one place we genuinely leave a judgment
+call to the model instead of code), and writing up the final answer with sources
+cited.
 
-Claude never: computes a score, validates an identifier, or decides what data/tools
-are reachable — all of that is plain code (`scoring.py`, `tools.py`'s whitelist,
-`agent.py`'s fixed tool schema). This holds for sensitivity scenarios too: Claude only
-chooses which weight numbers to pass; `scoring.py` does the arithmetic and ranking.
+Claude never computes a score, validates an airport code, or decides what data it's
+allowed to touch — all of that is plain code (`scoring.py`, the whitelist in
+`tools.py`, the fixed tool list in `agent.py`). That's true for the "what if"
+sensitivity scenarios too: Claude only picks which weight numbers to try; the actual
+math and ranking happen in `scoring.py`.
+
+## Voice call
+
+The agent can also run as a real, continuous phone-style call — you talk, it answers
+back, and you can interrupt it like a normal conversation. We plug our existing agent 
+into ElevenLabs' Conversational AI platform: they handle the
+microphone, the transcription, the spoken replies, and the turn-taking, and our
+server just answers the question "what should the agent say next," using the exact
+same Claude, tools, and system prompt as typed chat.
+
+The one real wrinkle: our agent sometimes needs several seconds to answer, especially
+if it has to call a tool like a live traffic lookup. A real-time voice platform
+expects an answer fast, or it assumes something's wrong and gives up on the call. So
+our server immediately says something like "Let me check on that," then keeps sending
+small signs of life every second while the real answer is still being worked out, and
+finally sends the real answer once it's ready. All three pieces arrive as one smooth
+reply, spoken as a single continuous answer with a natural pause in the middle — not
+three separate things.
