@@ -128,6 +128,13 @@ def test_system_prompt_never_calls_trailing_window_a_calendar_year():
     assert 'only has a trailing-12-month window, not a calendar-year figure' in prompt
 
 
+def test_system_prompt_never_names_internal_tool_functions_in_answers():
+    """Regression test: a live reply once said '...and rank_airports confirmed the
+    order' -- an internal function name leaking into analyst-facing prose."""
+    prompt = guardrails.SYSTEM_PROMPT
+    assert 'Never name the internal tool/function you called' in prompt
+
+
 def test_score_airport_caveats_distinguish_proxy_from_terminal_congestion(monkeypatch):
     """Capacity-pressure/utilization figures must be labeled as throughput proxies,
     not a direct measure of terminal/passenger congestion."""
