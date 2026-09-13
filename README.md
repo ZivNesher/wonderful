@@ -70,8 +70,6 @@ external call — an unknown code never reaches the BTS API.
   explicitly in the system prompt, since open web text is the least vetted input here.
 - **Path-safe session IDs.** `GET /sessions/{id}` and `/chat`'s `session_id` are
   validated as real UUIDs in code before touching the filesystem.
-- **Localhost only.** `server.py` binds to `127.0.0.1`; no login system, since this is
-  a single-user local tool (not a multi-tenant service).
 - **Grounding.** Every airport-specific number must come from a tool call in that
   conversation; missing data is reported as missing, never estimated.
 
