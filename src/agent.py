@@ -13,6 +13,8 @@ MAX_TOKENS = 2048
 MAX_TOOL_ROUNDS = 6
 MAX_PAUSE_RESUMES = 3  # web_search's server-side loop caps at 10 iterations before pausing
 
+_KNOWN_REGIONS = ", ".join(f"'{r.title()}'" for r in tools.REGIONS)
+
 TOOLS = [
     {
         "name": "lookup_airport",
@@ -39,9 +41,11 @@ TOOLS = [
     {
         "name": "list_airports_in_region",
         "description": (
-            "List whitelisted airports in a known US region grouping (e.g. 'New England', "
-            "'Southeast', 'Pacific Northwest'). Returns 'unknown_region' with the known list "
-            "if the region isn't recognized -- ask the user to clarify rather than guessing states."
+            f"List whitelisted airports in a known US region grouping. The only valid regions "
+            f"are: {_KNOWN_REGIONS} -- these are state groupings, not individual states (e.g. "
+            f"Texas is part of 'Southwest'). Never suggest a region name outside this exact list. "
+            "Returns 'unknown_region' with the known list if the region isn't recognized -- ask "
+            "the user to clarify rather than guessing states."
         ),
         "input_schema": {
             "type": "object",
