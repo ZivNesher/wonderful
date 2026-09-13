@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 import agent  # noqa: E402
 import server  # noqa: E402
 import sessions  # noqa: E402
-import tts  # noqa: E402
+import voice_llm  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -150,54 +150,161 @@ def test_get_session_invalid_id_rejected():
     assert resp.status_code in (400, 404)  # FastAPI routing may itself normalize/404 a path-traversal id
 
 
-def test_tts_empty_text_rejected():
+def test_voice_llm_unconfigured_returns_503(monkeypatch):
+    monkeypatch.setattr(server, "VOICE_LLM_SHARED_SECRET", None)
     with TestClient(server.app) as c:
-        resp = c.post("/tts", json={"text": "   "})
-    assert resp.status_code == 400
-
-
-def test_tts_too_long_text_rejected():
-    with TestClient(server.app) as c:
-        resp = c.post("/tts", json={"text": "x" * 2001})
-    assert resp.status_code == 400
-
-
-def test_tts_unconfigured_returns_503(monkeypatch):
-    monkeypatch.setattr(tts, "API_KEY", None)
-    with TestClient(server.app) as c:
-        resp = c.post("/tts", json={"text": "hello"})
+        resp = c.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
     assert resp.status_code == 503
 
 
-def test_tts_success_returns_audio(monkeypatch):
-    monkeypatch.setattr(tts, "API_KEY", "sk-fake-key")
-    monkeypatch.setattr(tts, "synthesize_speech", lambda text: b"fake-mp3-bytes")
+def test_voice_llm_missing_auth_rejected(monkeypatch):
+    monkeypatch.setattr(server, "VOICE_LLM_SHARED_SECRET", "test-secret")
     with TestClient(server.app) as c:
-        resp = c.post("/tts", json={"text": "hello"})
+        resp = c.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
+    assert resp.status_code == 401
+
+
+def test_voice_llm_wrong_auth_rejected(monkeypatch):
+    monkeypatch.setattr(server, "VOICE_LLM_SHARED_SECRET", "test-secret")
+    with TestClient(server.app) as c:
+        resp = c.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+            headers={"Authorization": "Bearer wrong-secret"},
+        )
+    assert resp.status_code == 401
+
+
+def test_voice_llm_valid_request_streams_openai_compatible_sse(monkeypatch):
+    monkeypatch.setattr(server, "VOICE_LLM_SHARED_SECRET", "test-secret")
+    monkeypatch.setattr(agent, "run_turn", _fake_run_turn)
+    with TestClient(server.app) as c:
+        resp = c.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "system", "content": "ignored"}, {"role": "user", "content": "hello"}]},
+            headers={"Authorization": "Bearer test-secret"},
+        )
     assert resp.status_code == 200
-    assert resp.headers["content-type"] == "audio/mpeg"
-    assert resp.content == b"fake-mp3-bytes"
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    assert "echo: hello" in resp.text
+    assert resp.text.rstrip().endswith("data: [DONE]")
 
 
-def test_tts_upstream_failure_returns_502(monkeypatch):
-    monkeypatch.setattr(tts, "API_KEY", "sk-fake-key")
-
-    def _boom(text):
-        raise RuntimeError("upstream exploded")
-
-    monkeypatch.setattr(tts, "synthesize_speech", _boom)
+def test_voice_llm_sends_filler_chunk_before_the_real_answer(monkeypatch):
+    """The filler must arrive as its own early chunk, before the (potentially
+    slow, tool-calling) real answer -- that's the whole latency fix: real
+    bytes flow immediately so ElevenLabs' Custom LLM integration doesn't
+    time out and retry/fail the call while agent.run_turn is still working."""
+    monkeypatch.setattr(server, "VOICE_LLM_SHARED_SECRET", "test-secret")
+    monkeypatch.setattr(agent, "run_turn", _fake_run_turn)
     with TestClient(server.app) as c:
-        resp = c.post("/tts", json={"text": "hello"})
+        resp = c.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hello"}]},
+            headers={"Authorization": "Bearer test-secret"},
+        )
+    filler_pos = resp.text.find("Let me check on that.")
+    answer_pos = resp.text.find("echo: hello")
+    assert filler_pos != -1 and answer_pos != -1
+    assert filler_pos < answer_pos
+
+
+def test_voice_llm_sends_keepalive_chunks_during_a_slow_turn(monkeypatch):
+    """Regression test: a real call was observed dropping mid-wait even after
+    the filler fixed the 'no response at all' case -- one long silent gap
+    between chunks was *also* enough for ElevenLabs to hang up. The stream
+    must keep producing bytes the whole time agent.run_turn is still running,
+    not just once at the start."""
+    import time
+
+    monkeypatch.setattr(server, "VOICE_LLM_SHARED_SECRET", "test-secret")
+    monkeypatch.setattr(voice_llm, "KEEPALIVE_INTERVAL_SECONDS", 0.05)
+
+    def _slow_run_turn(client, history, message):
+        time.sleep(0.2)
+        return _fake_run_turn(client, history, message)
+
+    monkeypatch.setattr(agent, "run_turn", _slow_run_turn)
+    with TestClient(server.app) as c:
+        resp = c.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hello"}]},
+            headers={"Authorization": "Bearer test-secret"},
+        )
+    # keepalive chunks carry a single-space content delta (not an empty
+    # delta -- see stream_reply's docstring for why) -- count them distinctly
+    # from the filler/real-answer/stop chunks.
+    keepalive_count = resp.text.count('"content": " "')
+    assert keepalive_count >= 2
+    assert "echo: hello" in resp.text
+
+
+def test_voice_llm_uses_full_message_history_not_just_latest(monkeypatch):
+    """ElevenLabs resends the whole conversation each call (it's stateless on our
+    side) -- everything but the latest user message must become `history`."""
+    monkeypatch.setattr(server, "VOICE_LLM_SHARED_SECRET", "test-secret")
+    seen = {}
+
+    def _recording_run_turn(client, history, message):
+        seen["history"] = history
+        seen["message"] = message
+        return "ok", history, False
+
+    monkeypatch.setattr(agent, "run_turn", _recording_run_turn)
+    with TestClient(server.app) as c:
+        c.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [
+                    {"role": "user", "content": "first"},
+                    {"role": "assistant", "content": "first reply"},
+                    {"role": "user", "content": "second"},
+                ]
+            },
+            headers={"Authorization": "Bearer test-secret"},
+        )
+    assert seen["message"] == "second"
+    assert seen["history"] == [{"role": "user", "content": "first"}, {"role": "assistant", "content": "first reply"}]
+
+
+def test_voice_llm_rejects_history_not_ending_in_user_message(monkeypatch):
+    monkeypatch.setattr(server, "VOICE_LLM_SHARED_SECRET", "test-secret")
+    with TestClient(server.app) as c:
+        resp = c.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "assistant", "content": "nothing to reply to"}]},
+            headers={"Authorization": "Bearer test-secret"},
+        )
+    assert resp.status_code == 400
+
+
+def test_voice_call_signed_url_unconfigured_returns_503(monkeypatch):
+    monkeypatch.setattr(voice_llm, "get_signed_url", lambda: (_ for _ in ()).throw(RuntimeError("must both be set")))
+    with TestClient(server.app) as c:
+        resp = c.get("/voice-call/signed-url")
+    assert resp.status_code == 503
+
+
+def test_voice_call_signed_url_success(monkeypatch):
+    monkeypatch.setattr(voice_llm, "get_signed_url", lambda: "wss://fake-signed-url")
+    with TestClient(server.app) as c:
+        resp = c.get("/voice-call/signed-url")
+    assert resp.status_code == 200
+    assert resp.json() == {"signed_url": "wss://fake-signed-url"}
+
+
+def test_voice_call_signed_url_upstream_failure_returns_502(monkeypatch):
+    monkeypatch.setattr(voice_llm, "get_signed_url", lambda: (_ for _ in ()).throw(RuntimeError("ElevenLabs 404: agent not found")))
+    with TestClient(server.app) as c:
+        resp = c.get("/voice-call/signed-url")
     assert resp.status_code == 502
 
 
 def test_dotenv_loaded_before_project_modules_import_in_source_order():
-    """Regression test for a real bug: tts.py (and agent.py) read an env var
-    as a module-level constant at import time, so server.py must call
-    load_dotenv() textually before importing tts/agent/sessions -- otherwise
-    a correctly-configured ELEVENLABS_API_KEY in .env is silently ignored
-    (tts.is_configured() stays False, /tts always 503 even with a valid key
-    file sitting right there).
+    """Regression test for a real bug: a module that reads an env var as a
+    module-level constant at import time needs load_dotenv() to have already
+    run, or a correctly-configured .env value is silently ignored (this bit
+    us for real with tts.py before it was removed).
 
     Checked as source order, not by spawning a process and letting
     load_dotenv() auto-discover a .env file: python-dotenv's default
@@ -213,7 +320,7 @@ def test_dotenv_loaded_before_project_modules_import_in_source_order():
 
     source = (Path(__file__).resolve().parent.parent / "src" / "server.py").read_text()
     load_dotenv_pos = source.index("load_dotenv()")
-    for module_import in ("import tts", "import agent", "import sessions"):
+    for module_import in ("import agent", "import sessions"):
         assert load_dotenv_pos < source.index(module_import), (
             f"{module_import!r} appears before load_dotenv() in server.py -- "
             "its module-level env var reads would silently miss .env"

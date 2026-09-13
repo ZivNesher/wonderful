@@ -5,12 +5,12 @@ load_dotenv()
 import uuid
 from pathlib import Path
 import anthropic
-from fastapi import FastAPI
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi import FastAPI, Header
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 import agent
 import sessions
-import tts
+import voice_llm
 
 if not os.environ.get("ANTHROPIC_API_KEY"):
     raise RuntimeError(
@@ -29,6 +29,7 @@ client = anthropic.Anthropic()
 app = FastAPI()
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
+VOICE_LLM_SHARED_SECRET = os.environ.get("VOICE_LLM_SHARED_SECRET")
 
 
 class ChatRequest(BaseModel):
@@ -42,8 +43,11 @@ class ChatResponse(BaseModel):
     used_web_search: bool = False
 
 
-class TTSRequest(BaseModel):
-    text: str
+class VoiceLLMRequest(BaseModel):
+    """Minimal slice of the OpenAI chat-completions request shape -- we only
+    need `messages`; every other field (model, temperature, tool defs for
+    ElevenLabs' own call-control tools, etc.) is accepted and ignored."""
+    messages: list[dict]
 
 
 @app.get("/")
@@ -73,22 +77,37 @@ def chat(req: ChatRequest) -> ChatResponse | JSONResponse:
     return ChatResponse(reply=reply_text, session_id=session_id, used_web_search=used_web_search)
 
 
-@app.post("/tts", response_model=None)
-def text_to_speech(req: TTSRequest):
-    """Synthesize speech for voice mode's spoken replies; 503 if unconfigured
-    so the frontend can fall back to the browser's own speechSynthesis."""
-    text = (req.text or "").strip()
-    if not text:
-        return JSONResponse(status_code=400, content={"error": "text must not be empty"})
-    if len(text) > 2000:
-        return JSONResponse(status_code=400, content={"error": "text is too long (2000 char max)"})
-    if not tts.is_configured():
-        return JSONResponse(status_code=503, content={"error": "voice output is not configured"})
+@app.post("/v1/chat/completions", response_model=None)
+def voice_chat_completions(req: VoiceLLMRequest, authorization: str | None = Header(default=None)):
+    """OpenAI-compatible endpoint so ElevenLabs' Conversational AI platform can
+    use this exact agent (Claude + tools.py + guardrails.py, unchanged) as its
+    real-time voice call's "Custom LLM" brain -- ElevenLabs handles STT/TTS/
+    turn-taking; we only ever return final text, streamed as SSE."""
+    if not VOICE_LLM_SHARED_SECRET:
+        return JSONResponse(status_code=503, content={"error": "voice call mode is not configured"})
+    if authorization != f"Bearer {VOICE_LLM_SHARED_SECRET}":
+        return JSONResponse(status_code=401, content={"error": "invalid or missing credentials"})
+
     try:
-        audio = tts.synthesize_speech(text)
-    except Exception as exc:  # noqa: BLE001 -- turned into a clean error, never a raw 500
-        return JSONResponse(status_code=502, content={"error": f"speech synthesis failed: {exc}"})
-    return Response(content=audio, media_type="audio/mpeg")
+        history, user_message = voice_llm.openai_messages_to_history(req.messages)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+    return StreamingResponse(voice_llm.stream_reply(client, history, user_message), media_type="text/event-stream")
+
+
+@app.get("/voice-call/signed-url", response_model=None)
+def voice_call_signed_url():
+    """Short-lived signed URL the browser uses to start a real-time voice call
+    with our ElevenLabs Agent -- keeps ELEVENLABS_API_KEY server-side; the
+    browser only ever sees a URL that expires in 15 minutes."""
+    try:
+        return JSONResponse(content={"signed_url": voice_llm.get_signed_url()})
+    except RuntimeError as exc:
+        message = str(exc)
+        if "must both be set" in message:
+            return JSONResponse(status_code=503, content={"error": "voice call mode is not configured"})
+        return JSONResponse(status_code=502, content={"error": f"failed to get signed url: {message}"})
 
 
 @app.get("/sessions", response_model=None)

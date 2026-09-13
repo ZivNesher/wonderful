@@ -79,13 +79,6 @@
   button { padding: 10px 16px; border-radius: 8px; border: none; background: var(--accent); color: var(--accent-text); font-size: 14px; font-weight: 600; cursor: pointer; }
   #send:hover:not(:disabled) { background: #d9d9d9; }
   button:disabled { opacity: 0.5; cursor: default; }
-  .speak-btn {
-    display: block; margin-top: 8px; padding: 0; width: 26px; height: 26px;
-    border-radius: 6px; border: none; background: transparent; color: var(--text-faint);
-    font-size: 14px; font-weight: 400; cursor: pointer;
-  }
-  .speak-btn:hover { background: var(--border); color: var(--text); }
-  .speak-btn.speaking { color: var(--text); }
 </style>
 </head>
 <body>
@@ -99,7 +92,7 @@
   <form id="form">
     <input id="input" type="text" placeholder="e.g. Which airports in New England are strong candidates for terminal expansion?" autocomplete="off">
     <button id="send" type="submit">Send</button>
-    <button id="voiceBtn" class="btn-voice" type="button" title="Click to speak">🎤</button>
+    <button id="callBtn" class="btn-voice" type="button" title="Start voice call">📞</button>
   </form>
 </main>
 <script>
@@ -111,7 +104,6 @@
   const historyList = document.getElementById("historyList");
   let sessionId = null;
   let conversationId = 0; // bumped whenever the visible conversation changes, to discard stale /chat replies
-  let currentSpeakButton = null; // the per-message speak-btn currently reading aloud, if any
 
   // Escape first, then apply a small whitelist of markdown -> HTML transforms,
   // so raw model text can never become live HTML/script.
@@ -217,38 +209,6 @@
     return html;
   }
 
-  // Reused by both the per-message speak button below and voice mode's
-  // auto-read-back further down; speakText() itself is defined later but
-  // function declarations are hoisted, so the forward reference is safe.
-  function setSpeakButtonState(btn, speaking) {
-    btn.textContent = speaking ? "⏸" : "🔊";
-    btn.title = speaking ? "Stop reading" : "Read aloud";
-    btn.classList.toggle("speaking", speaking);
-  }
-
-  function createSpeakButton(text) {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "speak-btn";
-    setSpeakButtonState(btn, false);
-    btn.addEventListener("click", async () => {
-      const wasThisSpeaking = currentSpeakButton === btn;
-      stopSpeaking();
-      if (currentSpeakButton) setSpeakButtonState(currentSpeakButton, false);
-      currentSpeakButton = null;
-      if (wasThisSpeaking) return; // clicking the active button again just stops it
-
-      currentSpeakButton = btn;
-      setSpeakButtonState(btn, true);
-      await speakText(text);
-      if (currentSpeakButton === btn) {
-        setSpeakButtonState(btn, false);
-        currentSpeakButton = null;
-      }
-    });
-    return btn;
-  }
-
   function addMessage(text, role, usedWebSearch) {
     const div = document.createElement("div");
     div.className = "msg " + role;
@@ -259,7 +219,6 @@
       }
       html += renderMarkdownSafe(text);
       div.innerHTML = html;
-      div.appendChild(createSpeakButton(text));
     } else {
       div.textContent = text; // user text and system notices: no formatting needed
     }
@@ -394,224 +353,75 @@
     input.focus();
   });
 
-  // ---- Voice mode ----
+  // ---- Real-time voice call (ElevenLabs Conversational AI) ----
+  // The only voice mode: a continuous, live call where ElevenLabs handles mic
+  // capture/audio playback/turn-taking itself over WebRTC. Our server is only
+  // ever called by ElevenLabs in the background (as the "Custom LLM"), never
+  // directly by this code.
 
-  function stripMarkdownForSpeech(text) {
-    return text
-      .replace(/```[\s\S]*?```/g, "")
-      .replace(/`([^`]+)`/g, "$1")
-      .replace(/^#{1,6}\s+/gm, "")
-      .replace(/\*\*([^*]+)\*\*/g, "$1")
-      .replace(/\*([^*]+)\*/g, "$1")
-      .replace(/^\s*[-*]\s+/gm, "")
-      .replace(/^\s*\d+[.)]\s+/gm, "")
-      .replace(/^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/gm, "")
-      .replace(/\|/g, ", ")
-      .replace(/\n{2,}/g, ". ")
-      .replace(/\n/g, " ")
-      .replace(/\s{2,}/g, " ")
-      .trim();
+  const callBtn = document.getElementById("callBtn");
+  let activeCall = null; // the ElevenLabs Conversation instance, or null when not on a call
+
+  function setCallButtonState(state) {
+    // state: "idle" | "connecting" | "listening" | "speaking"
+    const icons = { idle: "📞", connecting: "⏳", listening: "🔴", speaking: "🔊" };
+    callBtn.textContent = icons[state];
+    callBtn.title = state === "idle" ? "Start voice call" : "Click to end call";
+    callBtn.classList.remove("btn-voice-listening", "btn-voice-thinking", "btn-voice-speaking");
+    if (state === "connecting") callBtn.classList.add("btn-voice-thinking");
+    if (state === "listening") callBtn.classList.add("btn-voice-listening");
+    if (state === "speaking") callBtn.classList.add("btn-voice-speaking");
   }
 
-  let currentAudio = null;
-  let voiceFallbackNoticeShown = false;
-
-  function stopSpeaking() {
-    if (currentAudio) currentAudio.pause();
-    if ("speechSynthesis" in window) speechSynthesis.cancel();
+  async function endVoiceCall(alreadyDisconnected) {
+    if (!activeCall) return;
+    const call = activeCall;
+    activeCall = null;
+    if (!alreadyDisconnected) {
+      try { await call.endSession(); } catch (err) {}
+    }
+    addMessage("Voice call ended.", "system");
+    setCallButtonState("idle");
   }
 
-  function playAudioBlob(blob) {
-    return new Promise((resolve) => {
-      const url = URL.createObjectURL(blob);
-      currentAudio = new Audio(url);
-      // "pause" covers stopSpeaking() cutting playback short, so this never hangs.
-      const cleanup = () => {
-        URL.revokeObjectURL(url);
-        currentAudio = null;
-        resolve();
-      };
-      currentAudio.addEventListener("ended", cleanup, { once: true });
-      currentAudio.addEventListener("error", cleanup, { once: true });
-      currentAudio.addEventListener("pause", cleanup, { once: true });
-      currentAudio.play().catch(cleanup);
-    });
-  }
-
-  function speakWithBrowserTTS(text) {
-    return new Promise((resolve) => {
-      if (!("speechSynthesis" in window)) {
-        resolve();
-        return;
-      }
-      const utter = new SpeechSynthesisUtterance(text);
-      utter.addEventListener("end", resolve, { once: true });
-      utter.addEventListener("error", resolve, { once: true });
-      speechSynthesis.speak(utter);
-    });
-  }
-
-  async function speakText(text) {
-    const speechText = stripMarkdownForSpeech(text);
-    if (!speechText) return;
-
+  async function startVoiceCall() {
+    setCallButtonState("connecting");
     try {
-      const res = await fetch("/tts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: speechText }),
+      const res = await fetch("/voice-call/signed-url");
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "failed to start call");
+
+      const { Conversation } = await import("https://cdn.jsdelivr.net/npm/@elevenlabs/client/+esm");
+      activeCall = await Conversation.startSession({
+        signedUrl: data.signed_url,
+        connectionType: "websocket", // signedUrl (our /get-signed-url call) pairs with websocket; webrtc needs a conversationToken instead
+        onStatusChange: ({ status }) => {
+          if (status === "disconnected") endVoiceCall(true);
+        },
+        onModeChange: ({ mode }) => {
+          if (activeCall) setCallButtonState(mode === "speaking" ? "speaking" : "listening");
+        },
+        onMessage: ({ message, role }) => {
+          addMessage(message, role === "agent" ? "assistant" : "user");
+        },
+        onError: (message) => {
+          addMessage("Voice call error: " + message, "system");
+          endVoiceCall(true);
+        },
       });
-      if (res.ok) {
-        await playAudioBlob(await res.blob());
-        return;
-      }
+      addMessage("Voice call connected — speak naturally; click the phone button to hang up.", "system");
     } catch (err) {
-      // network error -- fall through to the browser fallback below
-    }
-
-    if (!voiceFallbackNoticeShown) {
-      voiceFallbackNoticeShown = true;
-      addMessage("Voice output is using your browser's built-in voice (set ELEVENLABS_API_KEY for a more natural one).", "system");
-    }
-    await speakWithBrowserTTS(speechText);
-  }
-
-  const voiceBtn = document.getElementById("voiceBtn");
-  const SpeechRecognitionImpl = window.SpeechRecognition || window.webkitSpeechRecognition;
-  // Brave disables the speech-recognition backend permanently (not
-  // intermittently), so detect it via its own official API to skip retrying.
-  let isBrave = false;
-  if (navigator.brave && typeof navigator.brave.isBrave === "function") {
-    navigator.brave.isBrave().then((result) => { isBrave = result; });
-  }
-  let recognition = null;
-  let liveTranscript = "";
-  let voiceState = "idle"; // idle -> listening -> thinking -> speaking -> idle
-  let networkRetryCount = 0;
-  const MAX_NETWORK_RETRIES = 3; // a flaky first attempt is a known SpeechRecognition quirk
-
-  function setVoiceButtonState(state) {
-    voiceState = state;
-    const icons = { idle: "🎤", listening: "⏹️", thinking: "⏳", speaking: "🔊" };
-    voiceBtn.textContent = icons[state];
-    voiceBtn.title = state === "listening" ? "Click to stop and send" : state === "idle" ? "Click to speak" : "Click to cancel";
-    voiceBtn.classList.remove("btn-voice-listening", "btn-voice-thinking", "btn-voice-speaking");
-    if (state !== "idle") voiceBtn.classList.add("btn-voice-" + state);
-  }
-
-  function resetVoiceUI() {
-    if (recognition) {
-      recognition.onresult = null;
-      recognition.onerror = null;
-      try { recognition.stop(); } catch (err) {}
-      recognition = null;
-    }
-    stopSpeaking();
-    input.readOnly = false;
-    setVoiceButtonState("idle");
-  }
-
-  // Restarts the underlying recognition session without resetting
-  // liveTranscript, so a mid-utterance retry doesn't lose what was heard.
-  function beginRecognitionInstance() {
-    recognition = new SpeechRecognitionImpl();
-    recognition.lang = "en-US";
-    recognition.continuous = true; // the analyst clicks to stop, not silence detection
-    recognition.interimResults = true; // live partial text = "hearing you" indicator
-
-    recognition.onresult = (event) => {
-      networkRetryCount = 0; // a real result means the network path works
-      let combined = "";
-      for (let i = 0; i < event.results.length; i++) combined += event.results[i][0].transcript;
-      liveTranscript = combined.trim();
-      input.value = liveTranscript; // visible, live proof it's hearing you
-    };
-
-    recognition.onerror = (event) => {
-      if (voiceState !== "listening") return;
-      if (event.error === "no-speech" || event.error === "aborted") {
-        beginRecognitionInstance(); // benign -- keep listening
-        return;
-      }
-      if (event.error === "network") {
-        if (isBrave) {
-          addMessage(
-            "Voice input doesn't work in Brave -- Brave disables the Google speech-recognition service this browser API depends on. Text chat and spoken replies work fine here; for voice input, use Chrome or Edge.",
-            "system"
-          );
-          resetVoiceUI();
-          return;
-        }
-        networkRetryCount++;
-        if (networkRetryCount <= MAX_NETWORK_RETRIES) {
-          setTimeout(() => { if (voiceState === "listening") beginRecognitionInstance(); }, 500);
-          return;
-        }
-        addMessage(
-          "Voice input keeps failing with a network error. Chrome's speech recognition sends your audio to Google's servers to transcribe it, so this means that connection is blocked -- check your internet connection, VPN/firewall, or an ad-blocker/privacy extension that might be blocking it.",
-          "system"
-        );
-        resetVoiceUI();
-        return;
-      }
-      addMessage("Voice input error: " + event.error, "system");
-      resetVoiceUI();
-    };
-
-    try {
-      recognition.start();
-    } catch (err) {
-      addMessage("Could not start voice input: " + err.message, "system");
-      resetVoiceUI();
+      addMessage("Couldn't start voice call: " + err.message, "system");
+      activeCall = null;
+      setCallButtonState("idle");
     }
   }
 
-  function startListening() {
-    liveTranscript = "";
-    input.value = "";
-    input.readOnly = true; // avoid the live transcript fighting with manual typing
-    networkRetryCount = 0;
-    setVoiceButtonState("listening");
-    beginRecognitionInstance();
-  }
-
-  async function stopListeningAndSend() {
-    if (recognition) {
-      recognition.onresult = null;
-      recognition.onerror = null;
-      try { recognition.stop(); } catch (err) {}
-      recognition = null;
-    }
-    const transcript = liveTranscript.trim();
-    input.value = "";
-    input.readOnly = false;
-    if (!transcript) {
-      setVoiceButtonState("idle");
-      return;
-    }
-
-    setVoiceButtonState("thinking");
-    const reply = await sendMessage(transcript);
-    if (voiceState !== "thinking") return; // cancelled while the request was in flight
-    if (reply) {
-      setVoiceButtonState("speaking");
-      await speakText(reply);
-      if (voiceState !== "speaking") return; // cancelled mid-reply
-    }
-    setVoiceButtonState("idle");
-  }
-
-  voiceBtn.addEventListener("click", () => {
-    if (voiceState === "idle") {
-      if (!SpeechRecognitionImpl) {
-        addMessage("Voice input isn't supported in this browser (try Chrome or Edge).", "system");
-        return;
-      }
-      startListening();
-    } else if (voiceState === "listening") {
-      stopListeningAndSend();
+  callBtn.addEventListener("click", () => {
+    if (activeCall) {
+      endVoiceCall(false);
     } else {
-      resetVoiceUI(); // thinking/speaking -- cancel this turn
+      startVoiceCall();
     }
   });
 </script>
