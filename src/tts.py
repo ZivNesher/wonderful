@@ -29,5 +29,8 @@ def synthesize_speech(text: str) -> bytes:
         params={"output_format": "mp3_44100_128"},
         timeout=30,
     )
-    response.raise_for_status()
+    if not response.ok:
+        # ElevenLabs' error body (e.g. "quota_exceeded", "missing_permissions")
+        # is the actual useful part -- raise_for_status() alone discards it.
+        raise RuntimeError(f"ElevenLabs {response.status_code}: {response.text[:300]}")
     return response.content
