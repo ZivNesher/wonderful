@@ -17,6 +17,13 @@ if not os.environ.get("ANTHROPIC_API_KEY"):
         "ANTHROPIC_API_KEY is not set. Copy .env.example to .env and fill it in -- "
         "the server refuses to start without it rather than failing confusingly later."
     )
+if not os.environ.get("BTS_SOCRATA_APP_TOKEN"):
+    raise RuntimeError(
+        "BTS_SOCRATA_APP_TOKEN is not set -- required for live traffic data (free, "
+        "instant signup at https://data.bts.gov/signup, then Profile -> Developer "
+        "Settings -> Create New App Token). Without it, every traffic/scoring "
+        "question would fail at query time instead of here at startup."
+    )
 
 client = anthropic.Anthropic()
 app = FastAPI()

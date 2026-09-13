@@ -56,10 +56,13 @@ TOOLS = [
     {
         "name": "get_traffic_stats",
         "description": (
-            "Get current-year BTS T-100 traffic totals (passengers, departures, arrivals, "
-            "enplanements) for one whitelisted airport. This is the default tool for a plain "
-            "factual question about one airport's traffic/congestion/demand -- prefer it over "
-            "score_airport whenever the user isn't asking for a ranking or recommendation."
+            "Get BTS T-100 traffic totals (passenger boardings, departures, seats, load factor) "
+            "for one whitelisted airport, queried live from BTS's monthly-updated feed and summed "
+            "over the trailing 12 months (the tool result's `period` field says which months). No "
+            "arrivals figure exists in this data -- only departures FROM the airport, never a "
+            "total-operations count. This is the default tool for a plain factual question about "
+            "one airport's traffic/congestion/demand -- prefer it over score_airport whenever the "
+            "user isn't asking for a ranking or recommendation."
         ),
         "input_schema": {
             "type": "object",

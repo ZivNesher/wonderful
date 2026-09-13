@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-
 from retrieval import great_circle_distance_miles
 
 LONG_HAUL_THRESHOLD_MILES = 2500  # chosen convention, documented in DESIGN.md
@@ -10,20 +8,6 @@ LONG_HAUL_THRESHOLD_MILES = 2500  # chosen convention, documented in DESIGN.md
 WEIGHT_TRAFFIC_INTENSITY = 0.40
 WEIGHT_CAPACITY_PRESSURE = 0.35
 WEIGHT_UTILIZATION = 0.25
-
-
-@dataclass
-class AirportKpis:
-    code: str
-    year: int
-    passengers: int
-    departures: int
-    enplanements: int
-    runway_count: int | None
-    longest_runway_ft: float | None
-    avg_passengers_per_departure: float | None
-    capacity_pressure: float | None  # departures per runway
-    long_haul: dict = field(default_factory=dict)  # share/count/total, or "insufficient_data"
 
 
 def avg_passengers_per_departure(passengers: int, departures: int) -> float | None:

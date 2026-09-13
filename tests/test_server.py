@@ -6,6 +6,7 @@ these tests never touch or depend on real saved conversations.
 import os
 
 os.environ.setdefault("ANTHROPIC_API_KEY", "sk-test-dummy-for-import-only")
+os.environ.setdefault("BTS_SOCRATA_APP_TOKEN", "test-dummy-for-import-only")
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402

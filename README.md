@@ -22,6 +22,18 @@ architecture, security, and how to run it.
 - No multi-user accounts — single local analyst tool.
 - No write/delete/external-messaging actions — every tool is read-only.
 
+## Data sources
+
+- **Public API — BTS T-100 (data.bts.gov, monthly-updated).** Passenger boardings,
+  departures, seats, and load factor, summed over a trailing 12-month window that
+  moves with the live data. Queried live at runtime, cached 24h. Free, but requires
+  a free Socrata app token (`BTS_SOCRATA_APP_TOKEN`, see "Running it" below).
+- **Bundled public datasets** (static snapshots, not APIs):
+  - **OurAirports** — airport/runway metadata.
+  - **OpenFlights** `routes.dat` — route-network snapshot used for long-haul share.
+
+Full methodology and per-file provenance: [DESIGN.md](DESIGN.md#data-sources).
+
 ## Architecture
 ![alt text](<Screenshot 2026-09-13 at 16.10.41.png>)
 
@@ -44,8 +56,8 @@ external call — an unknown code never reaches the BTS API.
 
 ## Security boundaries
 
-- **Secrets stay server-side.** `ANTHROPIC_API_KEY` and `ELEVENLABS_API_KEY` are never
-  sent to the browser or placed in a prompt.
+- **Secrets stay server-side.** `ANTHROPIC_API_KEY`, `BTS_SOCRATA_APP_TOKEN`, and
+  `ELEVENLABS_API_KEY` are never sent to the browser or placed in a prompt.
 - **Fixed tool schema.** No arbitrary HTTP/shell/file/code-execution tool is ever
   exposed to the model — a jailbreak has nothing to escalate to.
 - **Tool output is data, not instructions** (including web search results) — stated
@@ -61,9 +73,14 @@ external call — an unknown code never reaches the BTS API.
 cd airport-investment-agent
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # fill in ANTHROPIC_API_KEY (ELEVENLABS_API_KEY optional)
+cp .env.example .env   # fill in ANTHROPIC_API_KEY and BTS_SOCRATA_APP_TOKEN
+                        # (both required; ELEVENLABS_API_KEY optional)
 python3 src/server.py  # binds to 127.0.0.1:8000
 ```
+
+`BTS_SOCRATA_APP_TOKEN`: free, instant, no approval wait -- sign up at
+[data.bts.gov/signup](https://data.bts.gov/signup), then Profile → Developer
+Settings → Create New App Token.
 
 ## Tests
 
@@ -72,9 +89,10 @@ pytest tests/                                              # offline, no API key
 ANTHROPIC_API_KEY=sk-... pytest tests/test_live_eval.py     # live behavioral eval
 ```
 
-Offline tests (`test_scoring.py`, `test_tools.py`, `test_agent_harness.py`,
-`test_server.py`, `test_sessions.py`, `test_tts.py`) prove the code — scoring
-formulas, identifier validation, the tool-calling loop, HTTP layer, persistence — with
+Offline tests (`test_scoring.py`, `test_tools.py`, `test_retrieval.py`,
+`test_agent_harness.py`, `test_server.py`, `test_sessions.py`, `test_tts.py`) prove the
+code — scoring formulas, identifier validation, the tool-calling loop, HTTP layer,
+persistence — with
 a scripted fake Anthropic client, so none of it depends on a real model call.
 `test_live_eval.py` runs the skill's behavioral checklist (scope refusal, jailbreak
 resistance, prompt/credential extraction, indirect injection, grounding) against the

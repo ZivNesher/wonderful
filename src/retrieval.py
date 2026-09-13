@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,10 +14,13 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 CACHE_DIR = Path(__file__).resolve().parent.parent / ".cache"
 CACHE_TTL_SECONDS = 24 * 60 * 60
 
-BTS_FEATURE_SERVER = (
-    "https://services.arcgis.com/xOi1kZaI0eWDREZv/ArcGIS/rest/services/"
-    "T100_Domestic_Market_and_Segment_Data/FeatureServer/1/query"
-)
+# BTS T-100 Segment Summary By Origin Airport, hosted live on BTS's own Socrata
+# portal -- updated monthly (unlike the old ArcGIS snapshot, capped at 2024).
+# Single-record lookups work unauthenticated, but any $where/aggregate query
+# (needed for a trailing-12-month sum across airports) requires a free Socrata
+# app token -- see BTS_SOCRATA_APP_TOKEN in .env.example.
+BTS_SOCRATA_BASE = "https://data.bts.gov/resource/r495-tyji.json"
+BTS_TRAILING_MONTHS = 12
 
 
 @dataclass(frozen=True)
@@ -118,42 +122,77 @@ def great_circle_distance_miles(lat1: float, lon1: float, lat2: float, lon2: flo
     return 2 * radius_miles * math.asin(math.sqrt(a))
 
 
-def _fetch_bts_page(offset: int, page_size: int = 1000) -> list[dict]:
-    """Fetch one page of rows from the BTS ArcGIS FeatureServer."""
-    params = {
-        "where": "1=1",
-        "outFields": "year,origin,enplanements,passengers,departures,arrivals,freight,mail",
-        "resultOffset": offset,
-        "resultRecordCount": page_size,
-        "f": "json",
-    }
-    response = requests.get(BTS_FEATURE_SERVER, params=params, timeout=20)
+def _socrata_headers() -> dict:
+    token = os.environ.get("BTS_SOCRATA_APP_TOKEN")
+    return {"X-App-Token": token} if token else {}
+
+
+def _months_before(date_str: str, months_back: int) -> str:
+    """`date_str` (YYYY-MM-...) minus `months_back` months, as YYYY-MM-01."""
+    year, month = int(date_str[:4]), int(date_str[5:7])
+    total = year * 12 + (month - 1) - months_back
+    year, month = divmod(total, 12)
+    return f"{year:04d}-{month + 1:02d}-01"
+
+
+def _latest_reporting_month() -> str:
+    """YYYY-MM-DD of the most recent month present in the BTS T-100 dataset --
+    queried live so the trailing window always anchors to real data, not an
+    assumed publication lag."""
+    response = requests.get(
+        BTS_SOCRATA_BASE,
+        params={"$select": "max(reporting_month) as latest"},
+        headers=_socrata_headers(),
+        timeout=20,
+    )
     response.raise_for_status()
-    payload = response.json()
-    return [f["attributes"] for f in payload.get("features", [])]
+    return response.json()[0]["latest"][:10]
 
 
 def fetch_bts_traffic_all() -> dict[str, dict]:
-    """Bulk-fetch the whole BTS T-100 origin-airport table once (paginated,
-    ~2 requests), keyed by IATA code, and cache it to disk for 24h."""
+    """Bulk-fetch trailing-12-month BTS T-100 origin-airport totals (one grouped
+    SoQL query against the live, monthly-updated data.bts.gov feed), keyed by
+    IATA code, and cache it to disk for 24h."""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     cache_path = CACHE_DIR / "bts_all.json"
     if cache_path.exists() and (time.time() - cache_path.stat().st_mtime) < CACHE_TTL_SECONDS:
         return json.loads(cache_path.read_text())["by_code"]
 
+    period_end = _latest_reporting_month()
+    period_start = _months_before(period_end, BTS_TRAILING_MONTHS - 1)
+
+    response = requests.get(
+        BTS_SOCRATA_BASE,
+        params={
+            "$select": (
+                "origin_airport_code, sum(total_departures) as departures, "
+                "sum(total_passengers) as passengers, sum(total_seats) as seats"
+            ),
+            "$where": f"reporting_month >= '{period_start}' AND reporting_month <= '{period_end}'",
+            "$group": "origin_airport_code",
+            "$limit": 5000,
+        },
+        headers=_socrata_headers(),
+        timeout=30,
+    )
+    response.raise_for_status()
+
     by_code: dict[str, dict] = {}
-    offset = 0
-    while True:
-        page = _fetch_bts_page(offset)
-        if not page:
-            break
-        for row in page:
-            origin = row.get("origin")
-            if origin:
-                by_code[origin.strip().upper()] = row
-        if len(page) < 1000:
-            break
-        offset += 1000
+    for row in response.json():
+        code = (row.get("origin_airport_code") or "").strip().upper()
+        if not code:
+            continue
+        departures = int(row.get("departures") or 0)
+        passengers = int(row.get("passengers") or 0)
+        seats = int(row.get("seats") or 0)
+        by_code[code] = {
+            "departures": departures,
+            "passengers": passengers,
+            "seats": seats,
+            "load_factor": round(100 * passengers / seats, 1) if seats else None,
+            "period_start": period_start[:7],
+            "period_end": period_end[:7],
+        }
 
     cache_path.write_text(json.dumps({"fetched_at": time.time(), "by_code": by_code}))
     return by_code

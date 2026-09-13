@@ -140,7 +140,9 @@ def list_airports_in_region(region: str) -> dict:
 
 
 def get_traffic_stats(code: str) -> dict:
-    """Current-year BTS traffic totals for one whitelisted airport (live, cached)."""
+    """BTS T-100 traffic totals for one whitelisted airport -- trailing-12-month
+    totals queried live from BTS's own monthly-updated Socrata feed
+    (data.bts.gov), not a fixed calendar year."""
     airport = _resolve_code(code)
     if airport is None:
         return {"status": "invalid_identifier", "code": code}
@@ -151,25 +153,30 @@ def get_traffic_stats(code: str) -> dict:
         return {
             "status": "insufficient_data",
             "code": code,
-            "reason": "no current-year BTS T-100 record for this airport",
+            "reason": "no BTS T-100 record for this airport in the trailing 12-month window",
         }
 
     return {
         "status": "ok",
-        "source": "BTS T-100 Domestic Market and Segment Data (NTAD), current-year totals",
-        "year": row["year"],
+        "source": "BTS T-100 Segment Summary By Origin Airport (data.bts.gov), trailing 12 months",
+        "period": f"{row['period_start']} to {row['period_end']}",
         "iata_code": airport.iata_code,
         "passenger_boardings": row["passengers"],
         "departures": row["departures"],
-        "arrivals": row["arrivals"],
-        "enplanements": row["enplanements"],
+        "seats": row["seats"],
+        "load_factor_pct": row["load_factor"],
         "caveats": [
-            "'passenger_boardings' and 'enplanements' both count passengers boarding AT this "
-            "airport -- 'passenger_boardings' is BTS's Segment-level count, 'enplanements' is "
-            "BTS's Market-level count. Neither is a two-way total, and this dataset has no "
-            "deplanements figure. Never call either one 'total passenger traffic' or 'passengers "
-            "handled'; name the metric precisely (e.g. 'passenger boardings').",
-            "'departures' and 'arrivals' are flight-operation counts, not passenger counts.",
+            "'passenger_boardings' counts passengers boarding AT this airport (domestic + "
+            "international combined), summed over the trailing 12 months -- not a two-way "
+            "total (no deplanements figure exists in this dataset). Never call it 'total "
+            "passenger traffic' or 'passengers handled'; say 'passenger boardings' and name "
+            "the period.",
+            "'departures' is a flight-operation count (all classes), not a passenger count. "
+            "This dataset has no separate arrivals figure, so state 'departures FROM this "
+            "airport', never a 'total operations' figure that would need arrivals too.",
+            "'load_factor_pct' is BTS's own reported seats-filled percentage for this period "
+            "-- a real measured load factor, not the avg_passengers_per_departure proxy "
+            "score_airport uses (kept for methodology consistency with existing percentiles).",
         ],
     }
 
@@ -271,7 +278,7 @@ def score_airport(code: str, weights: dict | None = None) -> dict:
         "status": "ok",
         "code": airport.iata_code or airport.icao_code,
         "name": airport.name,
-        "year": traffic["year"],
+        "period": traffic["period"],
         "sources": [traffic["source"], "OurAirports (bundled)", "OpenFlights routes.dat (bundled)"],
         "inputs": {
             "passenger_boardings": traffic["passenger_boardings"],
@@ -286,9 +293,13 @@ def score_airport(code: str, weights: dict | None = None) -> dict:
         "expansion_candidacy_score": round(composite, 1) if composite is not None else None,
         "long_haul": long_haul,
         "caveats": [
-            "avg_passengers_per_departure is a utilization proxy, not a true seat-based load factor (no public seat-capacity field was available anonymously).",
+            "avg_passengers_per_departure is a utilization proxy used for this composite score's "
+            "percentile methodology; a real seats-based load factor is separately available from "
+            "get_traffic_stats (load_factor_pct), just not fed into this composite for consistency "
+            "with the documented weighting.",
             "capacity_pressure is a directional proxy (departures per runway), not an official airfield-capacity figure.",
-            "Percentiles are cross-sectional (current year only); no multi-year growth trend is available from the anonymous BTS source used here.",
+            "Percentiles are cross-sectional (this trailing-12-month period only, not a time series); "
+            "no multi-year growth trend is available from this BTS feed.",
             "long_haul share reflects OpenFlights' route-network snapshot, not live schedules or passenger volume.",
             "These are throughput/capacity-pressure proxies, not a direct measure of terminal or "
             "passenger congestion -- that would need terminal design capacity, peak-hour passenger "

@@ -12,19 +12,28 @@ handles conversation and tool orchestration; it never computes a score itself.
 |---|---|---|
 | [OurAirports](https://ourairports.com/data/) | Airport metadata, coordinates, runways | Static snapshot, bundled |
 | [OpenFlights](https://openflights.org/data.php) `routes.dat` | Nonstop route pairs | Static snapshot, bundled |
-| [BTS T-100](https://geodata.bts.gov/datasets/usdot::t-100-domestic-market-and-segment-data/about) (NTAD) | Current-year traffic (passengers/departures) | Live query, free, no key |
+| [BTS T-100](https://data.bts.gov/d/r495-tyji) (data.bts.gov) | Passenger boardings, departures, seats, and load factor, summed over a trailing 12-month window that moves with the live data (currently 2025-05 to 2026-04) | Public API, queried live at runtime, monthly-updated, free Socrata app token required |
 
 No single free source anonymously provides destination/distance/seats, so three
-sources cover what one couldn't: BTS for traffic volume, OpenFlights + OurAirports
-coordinates for long-haul distance, OurAirports for runway capacity. Per-file
-provenance: [`data/README.md`](data/README.md).
+sources cover what one couldn't: BTS for traffic volume and load factor, OpenFlights +
+OurAirports coordinates for long-haul distance, OurAirports for runway capacity.
+Per-file provenance: [`data/README.md`](data/README.md).
+
+BTS switched mid-project from a static NTAD snapshot (2024 only, no key, but no
+`arrivals`/`seats` either) to BTS's own monthly Socrata feed once we found it: this
+data.bts.gov dataset is updated monthly, includes a real seats-based load factor (not
+just a proxy), but requires a free app token for any multi-row query (single-airport
+lookups are open). It also has no `arrivals` field, so "total flight operations" is no
+longer something the agent can state — only departures.
 
 ## Scoring methodology
 
 Deterministic Python (`scoring.py`) — Claude narrates these numbers, never invents them.
 
-- **Avg. passengers per departure** = passengers ÷ departures. A utilization proxy,
-  not true seat-based load factor (no public seat-capacity field available).
+- **Avg. passengers per departure** = passengers ÷ departures. A utilization proxy used
+  for this composite score's percentile methodology. A real seats-based load factor is
+  now separately available (`get_traffic_stats`'s `load_factor_pct`, BTS-reported) but
+  isn't fed into the composite, to keep the documented weighting/methodology stable.
 - **Capacity pressure** = departures ÷ runway count. An infrastructure-strain proxy,
   not an official FAA capacity figure.
 - **Traffic/pressure/utilization percentiles** = each metric ranked against all other
@@ -33,11 +42,14 @@ Deterministic Python (`scoring.py`) — Claude narrates these numbers, never inv
   ≥2,500 miles (great-circle, via OurAirports coordinates). Measures route-network
   breadth, not passenger-weighted traffic.
 - **Composite expansion-candidacy score** = `0.40×traffic + 0.35×pressure + 0.25×utilization`
-  (all percentiles). Weights are a judgment call, documented as constants in `scoring.py`.
+  (all percentiles). This 40/35/25 weighting is the canonical, production score — a
+  judgment call documented as constants in `scoring.py`.
 - **Sensitivity scenarios.** The analyst can ask for custom weights (e.g. "double the
-  weight of congestion"); `rank_airports` recomputes a labeled `custom_score` and its
-  own rank/ties alongside the default score — same formula, different weight inputs,
-  never replacing the canonical score.
+  weight of congestion"); `rank_airports` recomputes a separately labeled `custom_score`
+  and its own rank/ties alongside the default score, using the same formula with
+  different weight inputs (any KPI not mentioned defaults to 1, i.e. equal weighting
+  *for that scenario only*). This is always temporary and additive — it never overwrites
+  or is described as the canonical 40/35/25 score.
 
 "Unmet demand" and "congestion" have no official public metric, so the agent never
 invents one — it either presents the proxies above (when asked to rank/recommend) or
@@ -46,9 +58,16 @@ blended together.
 
 ## Key tradeoffs
 
-- **No growth trend.** The only anonymous BTS endpoint is a current-year snapshot, not
-  a time series — scoring is cross-sectional (peer comparison), not longitudinal.
-- **No true load factor.** No public source publishes seat capacity anonymously.
+- **No growth trend.** BTS's feed gives a trailing 12-month window, not a multi-year
+  time series — scoring is cross-sectional (peer comparison), not longitudinal.
+- **No arrivals figure.** This BTS feed only reports departures per origin airport, so
+  the agent can state "departures from X" but never a "total operations" (departures +
+  arrivals) figure — that data simply isn't published here.
+- **Not a financial ROI model.** The composite score measures operational demand,
+  traffic intensity, capacity pressure, and utilization proxies — it is not a
+  profitability forecast. A real ROI/profitability model would need data this project
+  doesn't have: construction cost, financing terms, airport/airline revenue, gate
+  economics, operating cost, and project-specific demand forecasts.
 - **Long-haul share is route count, not passenger volume.** OpenFlights records which
   routes exist, not how often they fly.
 - **Turn-based voice, not real-time.** A continuous, interruptible voice conversation

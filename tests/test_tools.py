@@ -4,6 +4,8 @@ mocked tool-layer response carrying injected instruction-like text must come
 back as plain data, never executed). No real network calls -- retrieval's live
 BTS function is monkeypatched everywhere it would otherwise fire.
 """
+import json
+
 import pytest
 
 import guardrails
@@ -87,19 +89,20 @@ def test_list_airports_in_region_unknown_region():
     assert "new england" in result["known_regions"]
 
 
-def test_get_traffic_stats_caveats_disambiguate_passengers_vs_enplanements(monkeypatch):
-    """SFO passenger questions must not confuse 'passengers'/'enplanements' with a
-    two-way total -- the tool output itself must carry that disambiguation."""
+def test_get_traffic_stats_caveats_state_passenger_boardings_not_total(monkeypatch):
+    """SFO passenger questions must not be described as a two-way 'total' --
+    the tool output itself must carry that disambiguation."""
     monkeypatch.setattr(
         retrieval,
         "fetch_bts_traffic_all",
-        lambda: {"SFO": {"year": 2024, "origin": "SFO", "passengers": 17666714, "departures": 138571, "arrivals": 138528, "enplanements": 17631272}},
+        lambda: {"SFO": {"passengers": 26642605, "departures": 190280, "seats": 33125000, "load_factor": 80.4, "period_start": "2025-05", "period_end": "2026-04"}},
     )
     result = tools.get_traffic_stats("SFO")
     assert result["status"] == "ok"
+    assert result["period"] == "2025-05 to 2026-04"
     caveats_text = " ".join(result["caveats"]).lower()
     assert "two-way total" in caveats_text
-    assert "flight-operation counts, not passenger counts" in caveats_text
+    assert "flight-operation count" in caveats_text and "not a passenger count" in caveats_text
 
 
 def test_score_airport_caveats_distinguish_proxy_from_terminal_congestion(monkeypatch):
@@ -108,7 +111,7 @@ def test_score_airport_caveats_distinguish_proxy_from_terminal_congestion(monkey
     monkeypatch.setattr(
         retrieval,
         "fetch_bts_traffic_all",
-        lambda: {"SFO": {"year": 2024, "origin": "SFO", "passengers": 17666714, "departures": 138571, "arrivals": 138528, "enplanements": 17631272}},
+        lambda: {"SFO": {"passengers": 26642605, "departures": 190280, "seats": 33125000, "load_factor": 80.4, "period_start": "2025-05", "period_end": "2026-04"}},
     )
     result = tools.score_airport("SFO")
     assert result["status"] == "ok"
@@ -118,19 +121,21 @@ def test_score_airport_caveats_distinguish_proxy_from_terminal_congestion(monkey
 
 
 def test_system_prompt_treats_departures_as_the_answer_for_flights_from_an_airport():
-    """'How many flights operate from X' should be answered with departures, with
-    total operations (departures + arrivals) kept as an explicit secondary figure."""
+    """'How many flights operate from X' should be answered with departures only --
+    this data has no arrivals figure, so no 'total operations' claim should ever
+    be implied."""
     prompt = guardrails.SYSTEM_PROMPT
-    assert '"from"/"out of" an airport, departures is the answer' in prompt
-    assert "total operations (departures + arrivals)" in prompt
+    assert 'flights operate "from"/"out of" an airport,' in prompt
+    assert "state departures only" in prompt
+    assert 'never invent or imply a "total operations" figure' in prompt
 
 
 def test_score_airport_with_weights_adds_custom_scenario_without_changing_default(monkeypatch):
     """'Double the weight of congestion' must add a clearly labeled custom score
     alongside the canonical one, never replace or alter it."""
     fake_traffic = {
-        "SFO": {"year": 2024, "origin": "SFO", "passengers": 17666714, "departures": 138571, "arrivals": 138528, "enplanements": 17631272},
-        "LAX": {"year": 2024, "origin": "LAX", "passengers": 26340206, "departures": 206637, "arrivals": 207004, "enplanements": 26239010},
+        "SFO": {"passengers": 26642605, "departures": 190280, "seats": 33125000, "load_factor": 80.4, "period_start": "2025-05", "period_end": "2026-04"},
+        "LAX": {"passengers": 34500000, "departures": 250000, "seats": 43000000, "load_factor": 80.2, "period_start": "2025-05", "period_end": "2026-04"},
     }
     monkeypatch.setattr(retrieval, "fetch_bts_traffic_all", lambda: fake_traffic)
 
@@ -191,11 +196,12 @@ def test_indirect_injection_in_tool_output_is_inert_data(monkeypatch):
     monkeypatch.setattr(
         retrieval,
         "fetch_bts_traffic_all",
-        lambda: {"SFO": {"year": 2024, "origin": injected, "passengers": 100, "departures": 10, "arrivals": 10, "enplanements": 100}},
+        lambda: {"SFO": {"passengers": 100, "departures": 10, "seats": 150, "load_factor": 66.7, "period_start": "2025-05", "period_end": "2026-04", "_unexpected_field": injected}},
     )
     result = tools.get_traffic_stats("SFO")
     assert result["status"] == "ok"
-    # the injected string is just data on the wire; tools.py never reads `origin`
-    # back out of the row for anything (it trusts the already-validated code),
-    # so nothing here should have altered control flow or raised.
+    # the injected string rides along in an unused field; tools.py only ever reads
+    # the specific numeric keys it expects, so nothing here should have altered
+    # control flow, raised, or leaked the injected text into the response.
     assert result["passenger_boardings"] == 100
+    assert injected not in json.dumps(result)
