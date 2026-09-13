@@ -23,26 +23,7 @@ architecture, security, and how to run it.
 - No write/delete/external-messaging actions — every tool is read-only.
 
 ## Architecture
-
-```
-Browser (web/index.html)
-   |  POST /chat, /tts   GET /sessions, /sessions/{id}
-   v
-FastAPI server (server.py) -- localhost only
-   |
-   +-- sessions.py  -- one JSON file per conversation (.sessions/)
-   +-- tts.py       -- ElevenLabs speech synthesis (optional)
-   |
-   v
-Agent loop (agent.py) -- Claude, tool use
-   |
-   +-- tools.py -- 6 read-only functions, validate identifiers before touching data
-   |      +-- retrieval.py --> OurAirports / OpenFlights (bundled) + BTS T-100 (live)
-   |      v
-   |   scoring.py -- deterministic KPIs, no LLM
-   |
-   +-- web_search (native Anthropic tool) -- supplementary, never a scored number
-```
+![alt text](<Screenshot 2026-09-13 at 16.10.41.png>)
 
 One agent, one process. No database (sessions are one JSON file each — nothing here
 needs a query engine), no vector database (every lookup is by airport code/region, not
