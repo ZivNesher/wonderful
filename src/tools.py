@@ -177,6 +177,11 @@ def get_traffic_stats(code: str) -> dict:
             "'load_factor_pct' is BTS's own reported seats-filled percentage for this period "
             "-- a real measured load factor, not the avg_passengers_per_departure proxy "
             "score_airport uses (kept for methodology consistency with existing percentiles).",
+            "'period' is a trailing 12-month window (it moves forward as new BTS data arrives "
+            "each month), NOT a calendar year -- never call it a 'complete calendar year' or "
+            "'latest complete calendar year'. This data source doesn't separately expose a "
+            "calendar-year figure; if asked for one, say plainly that only the trailing-12-month "
+            "period is available, rather than reinterpreting it as a calendar year.",
         ],
     }
 
@@ -304,6 +309,11 @@ def score_airport(code: str, weights: dict | None = None) -> dict:
             "These are throughput/capacity-pressure proxies, not a direct measure of terminal or "
             "passenger congestion -- that would need terminal design capacity, peak-hour passenger "
             "volume, gate utilization, or security wait-time data, none of which is in this dataset.",
+            "traffic_percentile_vs_peers is based on outbound passenger_boardings only. Applying "
+            "the same outbound-only definition to every airport makes the comparison internally "
+            "consistent, but that does NOT guarantee the ranking is unbiased -- airports with "
+            "unusual inbound/outbound imbalances could still be affected, so this is not "
+            "equivalent to ranking by total two-way passenger traffic.",
         ],
     }
     if custom_scenario is not None:

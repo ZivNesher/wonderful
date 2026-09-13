@@ -103,6 +103,29 @@ def test_get_traffic_stats_caveats_state_passenger_boardings_not_total(monkeypat
     caveats_text = " ".join(result["caveats"]).lower()
     assert "two-way total" in caveats_text
     assert "flight-operation count" in caveats_text and "not a passenger count" in caveats_text
+    assert "not a calendar year" in caveats_text
+    assert "complete calendar year" in caveats_text
+
+
+def test_score_airport_caveats_do_not_claim_ranking_is_unbiased(monkeypatch):
+    """Outbound-only comparisons must be described as internally consistent,
+    never as guaranteed-unbiased."""
+    monkeypatch.setattr(
+        retrieval,
+        "fetch_bts_traffic_all",
+        lambda: {"SFO": {"passengers": 26642605, "departures": 190280, "seats": 33125000, "load_factor": 80.4, "period_start": "2025-05", "period_end": "2026-04"}},
+    )
+    result = tools.score_airport("SFO")
+    assert result["status"] == "ok"
+    caveats_text = " ".join(result["caveats"]).lower()
+    assert "internally consistent" in caveats_text
+    assert "does not guarantee the ranking is unbiased" in caveats_text
+
+
+def test_system_prompt_never_calls_trailing_window_a_calendar_year():
+    prompt = guardrails.SYSTEM_PROMPT
+    assert 'complete calendar year' in prompt
+    assert 'only has a trailing-12-month window, not a calendar-year figure' in prompt
 
 
 def test_score_airport_caveats_distinguish_proxy_from_terminal_congestion(monkeypatch):
